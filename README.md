@@ -2,16 +2,17 @@
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
 
-# Hermes Agent ☤
+# WinHermes Agent ☤
 
 <p align="center">
   <a href="https://hermes-agent.nousresearch.com/docs/"><img src="https://img.shields.io/badge/Docs-hermes--agent.nousresearch.com-FFD700?style=for-the-badge" alt="Documentation"></a>
   <a href="https://discord.gg/NousResearch"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://github.com/NousResearch/hermes-agent/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License: MIT"></a>
   <a href="https://nousresearch.com"><img src="https://img.shields.io/badge/Built%20by-Nous%20Research-blueviolet?style=for-the-badge" alt="Built by Nous Research"></a>
+  <a href="https://github.com/Krasen007/winhermes-agent"><img src="https://img.shields.io/badge/Fork-WinHermes-0078d7?style=for-the-badge" alt="Windows Fork"></a>
 </p>
 
-**The self-improving AI agent built by [Nous Research](https://nousresearch.com).** It's the only agent with a built-in learning loop — it creates skills from experience, improves them during use, nudges itself to persist knowledge, searches its own past conversations, and builds a deepening model of who you are across sessions. Run it on a $5 VPS, a GPU cluster, or serverless infrastructure that costs nearly nothing when idle. It's not tied to your laptop — talk to it from Telegram while it works on a cloud VM.
+**A Windows-compatible fork of Hermes Agent by [Nous Research](https://nousresearch.com).** WinHermus enables native Windows support for the self-improving AI agent, bringing all the power of Hermes to Windows users without requiring WSL2. This fork includes fixes for Windows-specific issues, Ollama integration improvements, and enhanced provider resolution for custom endpoints.
 
 Use any model you want — [Nous Portal](https://portal.nousresearch.com), [OpenRouter](https://openrouter.ai) (200+ models), [z.ai/GLM](https://z.ai), [Kimi/Moonshot](https://platform.moonshot.ai), [MiniMax](https://www.minimax.io), OpenAI, or your own endpoint. Switch with `hermes model` — no code changes, no lock-in.
 
@@ -29,13 +30,31 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), [Open
 
 ## Quick Install
 
+### Windows (Native)
+
+```batch
+# Clone and run the setup script
+git clone https://github.com/Krasen007/winhermes-agent.git
+cd winhermes-agent
+setup-hermes.bat
+```
+
+The setup script handles everything — Python, uv, dependencies, and the `hermes` command. Prerequisites:
+- Git for Windows (provides bash.exe for terminal commands)
+
+After installation:
+
+```batch
+hermes              # start chatting!
+```
+
+### Linux, macOS, and WSL2
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
 ```
 
 Works on Linux, macOS, and WSL2. The installer handles everything — Python, Node.js, dependencies, and the `hermes` command. No prerequisites except git.
-
-> **Windows:** Native Windows is not supported. Please install [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and run the command above.
 
 After installation:
 
@@ -43,6 +62,14 @@ After installation:
 source ~/.bashrc    # reload shell (or: source ~/.zshrc)
 hermes              # start chatting!
 ```
+
+### Windows-Specific Features
+
+- ✅ **Native Windows support** - No WSL2 required
+- ✅ **Ollama integration** - Fixed provider resolution for local models
+- ✅ **Custom endpoint support** - Enhanced detection for OpenAI-compatible APIs
+- ✅ **Windows path handling** - Proper handling of Windows file paths
+- ✅ **PowerShell scripts** - Windows-native automation scripts
 
 ---
 
@@ -59,6 +86,31 @@ hermes claw migrate # Migrate from OpenClaw (if coming from OpenClaw)
 hermes update       # Update to the latest version
 hermes doctor       # Diagnose any issues
 ```
+
+### Ollama Integration on Windows
+
+WinHermes includes improved Ollama support for Windows users:
+
+```yaml
+# ~/.hermes/config.yaml
+model:
+  default: qwen3.5:4b
+  provider: custom
+  base_url: http://localhost:11434/v1
+```
+
+```batch
+# Run with Ollama
+hermes --model qwen3.5:4b --base-url http://localhost:11434/v1
+```
+
+**Fixed Issues:**
+- ✅ Custom provider resolution now correctly returns `provider: "openai"` for OpenAI-compatible endpoints
+- ✅ Generic endpoint detection properly identifies non-OpenRouter URLs
+- ✅ Base URL configuration added for custom providers
+- ✅ Model format fixed for LiteLLM compatibility (no `ollama/` prefix needed)
+
+**Note:** Some models (like qwen3.5:4b) don't support function calling. Use tool-compatible models like Llama 3.1 for full tool support.
 
 📖 **[Full documentation →](https://hermes-agent.nousresearch.com/docs/)**
 
@@ -79,6 +131,51 @@ Hermes has two entry points: start the terminal UI with `hermes`, or run the gat
 | Platform-specific status | `/platforms` | `/status`, `/sethome` |
 
 For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
+
+---
+
+## Recent Updates & Fixes
+
+### Windows-Specific Improvements
+
+- **Fixed custom provider resolution** - Custom endpoints now correctly return `provider: "openai"` instead of hardcoded `"openrouter"`
+- **Enhanced endpoint detection** - Generic fallback now detects endpoint type based on URL
+- **Ollama integration** - Full support for local Ollama models with proper configuration
+- **Windows path handling** - Improved file path handling for Windows environments
+- **Telegram gateway fixes** - Resolved media path errors on Windows
+
+### Configuration Examples
+
+#### Custom Provider (Ollama) Configuration
+```yaml
+# ~/.hermes/config.yaml
+model:
+  default: llama3.1:8b
+  provider: custom
+  base_url: http://localhost:11434/v1
+
+# Environment variables (.env)
+OPENAI_API_KEY=dummy-key
+OPENAI_BASE_URL=http://localhost:11434/v1
+```
+
+#### Direct Command Line Usage
+```batch
+# Using Ollama with a tool-compatible model
+hermes --model llama3.1:8b --base-url http://localhost:11434/v1
+
+# Using OpenRouter
+hermes --model openrouter:meta-llama/llama-3.1-8b-instruct
+
+# Using custom endpoint
+hermes --model custom:gpt-4o --base-url https://api.example.com/v1
+```
+
+### Known Limitations
+
+- Some models (e.g., qwen3.5:4b in Ollama) don't support function calling through the OpenAI API format
+- Telegram gateway may show media path errors for invalid MEDIA: tags (cosmetic issue)
+- Model-specific parameters (like thinking mode) may not be exposed through all providers
 
 ---
 
@@ -139,24 +236,23 @@ See `hermes claw migrate --help` for all options, or use the `openclaw-migration
 
 We welcome contributions! See the [Contributing Guide](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) for development setup, code style, and PR process.
 
-Quick start for contributors:
+Quick start for Windows contributors:
 
-```bash
-git clone https://github.com/NousResearch/hermes-agent.git
-cd hermes-agent
+```batch
+git clone https://github.com/Krasen007/winhermes-agent.git
+cd winhermes-agent
 git submodule update --init mini-swe-agent   # required terminal backend
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv venv .venv --python 3.11
-source .venv/bin/activate
-uv pip install -e ".[all,dev]"
-uv pip install -e "./mini-swe-agent"
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e ".[all,dev]"
+pip install -e "./mini-swe-agent"
 python -m pytest tests/ -q
 ```
 
 > **RL Training (optional):** To work on the RL/Tinker-Atropos integration, also run:
-> ```bash
+> ```batch
 > git submodule update --init tinker-atropos
-> uv pip install -e "./tinker-atropos"
+> pip install -e "./tinker-atropos"
 > ```
 
 ---
@@ -165,8 +261,8 @@ python -m pytest tests/ -q
 
 - 💬 [Discord](https://discord.gg/NousResearch)
 - 📚 [Skills Hub](https://agentskills.io)
-- 🐛 [Issues](https://github.com/NousResearch/hermes-agent/issues)
-- 💡 [Discussions](https://github.com/NousResearch/hermes-agent/discussions)
+- 🐛 [Issues](https://github.com/Krasen007/winhermes-agent/issues)
+- 💡 [Discussions](https://github.com/Krasen007/winhermes-agent/discussions)
 
 ---
 
@@ -174,4 +270,6 @@ python -m pytest tests/ -q
 
 MIT — see [LICENSE](LICENSE).
 
-Built by [Nous Research](https://nousresearch.com).
+Forked for Windows compatibility by [Krasen007](https://github.com/Krasen007).
+
+Original built by [Nous Research](https://nousresearch.com).
