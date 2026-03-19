@@ -19,6 +19,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+_IS_WINDOWS = sys.platform == "win32"
+
+
+def _process_exists(pid: int) -> bool:
+    """Check if a process with the given PID exists (cross-platform)."""
+    if _IS_WINDOWS:
+        # On Windows, os.kill(pid, 0) raises OSError with incorrect format error.
+        # Use ctypes to check if process exists instead.
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_INFORMATION = 0x0400
+            handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    else:
+        # On Unix, os.kill with signal 0 checks process existence
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError, OSError):
+            return False
+
+
 _GATEWAY_KIND = "hermes-gateway"
 _RUNTIME_STATUS_FILE = "gateway_state.json"
 _LOCKS_DIRNAME = "gateway-locks"
@@ -262,11 +290,7 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
 
         stale = existing_pid is None
         if not stale:
-            try:
-                os.kill(existing_pid, 0)
-            except (ProcessLookupError, PermissionError):
-                stale = True
-            else:
+            if _process_exists(existing_pid):
                 current_start = _get_process_start_time(existing_pid)
                 if (
                     existing.get("start_time") is not None
@@ -274,6 +298,8 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                     and current_start != existing.get("start_time")
                 ):
                     stale = True
+            else:
+                stale = True
         if stale:
             try:
                 lock_path.unlink(missing_ok=True)
@@ -331,9 +357,7 @@ def get_running_pid() -> Optional[int]:
         remove_pid_file()
         return None
 
-    try:
-        os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
-    except (ProcessLookupError, PermissionError):
+    if not _process_exists(pid):
         remove_pid_file()
         return None
 

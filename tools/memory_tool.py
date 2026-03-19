@@ -23,15 +23,22 @@ Design:
 - Frozen snapshot pattern: system prompt is stable, tool responses show live state
 """
 
-import fcntl
 import json
 import logging
 import os
+import platform
 import re
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+# Cross-platform file locking
+_IS_WINDOWS = platform.system() == "Windows"
+if _IS_WINDOWS:
+    import msvcrt
+else:
+    import fcntl
 
 logger = logging.getLogger(__name__)
 
@@ -134,10 +141,19 @@ class MemoryStore:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = open(lock_path, "w")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if _IS_WINDOWS:
+                msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX)
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if _IS_WINDOWS:
+                try:
+                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
             fd.close()
 
     @staticmethod

@@ -1,14 +1,19 @@
 """Persistent shell mixin: file-based IPC protocol for long-lived bash shells."""
 
 import logging
+import os
+import platform
 import shlex
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
 from abc import abstractmethod
 
 from tools.interrupt import is_interrupted
+
+_IS_WINDOWS = platform.system() == "Windows"
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +49,7 @@ class PersistentShellMixin:
 
     @property
     def _temp_prefix(self) -> str:
-        return f"/tmp/hermes-persistent-{self._session_id}"
+        return os.path.join(tempfile.gettempdir(), f"hermes-persistent-{self._session_id}")
 
     # ------------------------------------------------------------------
     # Lifecycle

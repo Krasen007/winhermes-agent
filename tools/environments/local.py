@@ -254,7 +254,10 @@ def _clean_shell_noise(output: str) -> str:
     return result
 
 
-_SANE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+if _IS_WINDOWS:
+    _SANE_PATH = ""  # Windows PATH is managed by Git Bash environment
+else:
+    _SANE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
 def _make_run_env(env: dict) -> dict:
@@ -267,9 +270,10 @@ def _make_run_env(env: dict) -> dict:
             run_env[real_key] = v
         elif k not in _HERMES_PROVIDER_ENV_BLOCKLIST:
             run_env[k] = v
-    existing_path = run_env.get("PATH", "")
-    if "/usr/bin" not in existing_path.split(":"):
-        run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
+    if not _IS_WINDOWS:
+        existing_path = run_env.get("PATH", "")
+        if "/usr/bin" not in existing_path.split(":"):
+            run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
     return run_env
 
 
@@ -318,7 +322,7 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
 
     @property
     def _temp_prefix(self) -> str:
-        return f"/tmp/hermes-local-{self._session_id}"
+        return os.path.join(tempfile.gettempdir(), f"hermes-local-{self._session_id}")
 
     def _spawn_shell_process(self) -> subprocess.Popen:
         user_shell = _find_bash()
@@ -347,10 +351,16 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
         if self._shell_pid is None:
             return
         try:
-            subprocess.run(
-                ["pkill", "-P", str(self._shell_pid)],
-                capture_output=True, timeout=5,
-            )
+            if _IS_WINDOWS:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(self._shell_pid)],
+                    capture_output=True, timeout=5,
+                )
+            else:
+                subprocess.run(
+                    ["pkill", "-P", str(self._shell_pid)],
+                    capture_output=True, timeout=5,
+                )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 

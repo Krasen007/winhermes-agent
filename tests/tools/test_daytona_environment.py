@@ -64,8 +64,7 @@ def make_env(daytona_sdk, monkeypatch):
 
     def _factory(
         sandbox=None,
-        get_side_effect=None,
-        list_return=None,
+        find_one_side_effect=None,
         home_dir="/root",
         persistent=True,
         **kwargs,
@@ -77,17 +76,11 @@ def make_env(daytona_sdk, monkeypatch):
         mock_client = MagicMock()
         mock_client.create.return_value = sandbox
 
-        if get_side_effect is not None:
-            mock_client.get.side_effect = get_side_effect
+        if find_one_side_effect is not None:
+            mock_client.find_one.side_effect = find_one_side_effect
         else:
-            # Default: no existing sandbox found via get()
-            mock_client.get.side_effect = daytona_sdk.DaytonaError("not found")
-
-        # Default: no legacy sandbox found via list()
-        if list_return is not None:
-            mock_client.list.return_value = list_return
-        else:
-            mock_client.list.return_value = SimpleNamespace(items=[])
+            # Default: no existing sandbox found
+            mock_client.find_one.side_effect = daytona_sdk.DaytonaError("not found")
 
         daytona_sdk.Daytona = MagicMock(return_value=mock_client)
 
@@ -138,46 +131,24 @@ class TestCwdResolution:
 # ---------------------------------------------------------------------------
 
 class TestPersistence:
-    def test_persistent_resumes_via_get(self, make_env):
+    def test_persistent_resumes_existing_sandbox(self, make_env):
         existing = _make_sandbox(sandbox_id="sb-existing")
         existing.process.exec.return_value = _make_exec_response(result="/root")
-        env = make_env(get_side_effect=lambda name: existing, persistent=True,
-                       task_id="mytask")
+        env = make_env(find_one_side_effect=lambda **kw: existing, persistent=True)
         existing.start.assert_called_once()
-        env._mock_client.get.assert_called_once_with("hermes-mytask")
-        env._mock_client.create.assert_not_called()
-
-    def test_persistent_resumes_legacy_via_list(self, make_env, daytona_sdk):
-        legacy = _make_sandbox(sandbox_id="sb-legacy")
-        legacy.process.exec.return_value = _make_exec_response(result="/root")
-        env = make_env(
-            get_side_effect=daytona_sdk.DaytonaError("not found"),
-            list_return=SimpleNamespace(items=[legacy]),
-            persistent=True,
-            task_id="mytask",
-        )
-        legacy.start.assert_called_once()
-        env._mock_client.list.assert_called_once_with(
-            labels={"hermes_task_id": "mytask"}, page=1, limit=1)
+        # Should NOT have called create since find_one succeeded
         env._mock_client.create.assert_not_called()
 
     def test_persistent_creates_new_when_none_found(self, make_env, daytona_sdk):
         env = make_env(
-            get_side_effect=daytona_sdk.DaytonaError("not found"),
+            find_one_side_effect=daytona_sdk.DaytonaError("not found"),
             persistent=True,
-            task_id="mytask",
         )
         env._mock_client.create.assert_called_once()
-        # Verify the name and labels were passed to CreateSandboxFromImageParams
-        # by checking get() was called with the right sandbox name
-        env._mock_client.get.assert_called_with("hermes-mytask")
-        env._mock_client.list.assert_called_with(
-            labels={"hermes_task_id": "mytask"}, page=1, limit=1)
 
-    def test_non_persistent_skips_lookup(self, make_env):
+    def test_non_persistent_skips_find_one(self, make_env):
         env = make_env(persistent=False)
-        env._mock_client.get.assert_not_called()
-        env._mock_client.list.assert_not_called()
+        env._mock_client.find_one.assert_not_called()
         env._mock_client.create.assert_called_once()
 
 

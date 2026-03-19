@@ -46,7 +46,6 @@ class ContextCompressor:
         summary_model_override: str = None,
         base_url: str = "",
         api_key: str = "",
-        config_context_length: int | None = None,
     ):
         self.model = model
         self.base_url = base_url
@@ -57,10 +56,7 @@ class ContextCompressor:
         self.summary_target_tokens = summary_target_tokens
         self.quiet_mode = quiet_mode
 
-        self.context_length = get_model_context_length(
-            model, base_url=base_url, api_key=api_key,
-            config_context_length=config_context_length,
-        )
+        self.context_length = get_model_context_length(model, base_url=base_url, api_key=api_key)
         self.threshold_tokens = int(self.context_length * threshold_percent)
         self.compression_count = 0
         self._context_probed = False  # True after a step-down from context error
@@ -257,24 +253,18 @@ Write only the summary body. Do not include any preamble or prefix; the system w
         """Pull a compress-end boundary backward to avoid splitting a
         tool_call / result group.
 
-        If the boundary falls in the middle of a tool-result group (i.e.
-        there are consecutive tool messages before ``idx``), walk backward
-        past all of them to find the parent assistant message.  If found,
-        move the boundary before the assistant so the entire
-        assistant + tool_results group is included in the summarised region
-        rather than being split (which causes silent data loss when
-        ``_sanitize_tool_pairs`` removes the orphaned tail results).
+        If the message just before ``idx`` is an assistant message with
+        tool_calls, those tool results will start at ``idx`` and would be
+        separated from their parent.  Move backwards to include the whole
+        group in the summarised region.
         """
         if idx <= 0 or idx >= len(messages):
             return idx
-        # Walk backward past consecutive tool results
-        check = idx - 1
-        while check >= 0 and messages[check].get("role") == "tool":
-            check -= 1
-        # If we landed on the parent assistant with tool_calls, pull the
-        # boundary before it so the whole group gets summarised together.
-        if check >= 0 and messages[check].get("role") == "assistant" and messages[check].get("tool_calls"):
-            idx = check
+        prev = messages[idx - 1]
+        if prev.get("role") == "assistant" and prev.get("tool_calls"):
+            # The results for this assistant turn sit at idx..idx+k.
+            # Include the assistant message in the summarised region too.
+            idx -= 1
         return idx
 
     def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None) -> List[Dict[str, Any]]:
