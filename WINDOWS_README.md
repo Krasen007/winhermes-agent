@@ -109,12 +109,90 @@ The Windows code execution implementation includes:
    - Proper environment variable passing for IPC type
    - Maintains same security model as original
 
+## Windows-Specific Features
+
+- **Native Windows support** - No WSL2 required
+- **Code execution on Windows** - Full sandboxed Python execution with named pipes or TCP fallback
+- **Cross-platform IPC abstraction** - Unix domain sockets (Linux/macOS), named pipes (Windows), TCP fallback
+- **Windows process sandboxing** - Proper process isolation with hidden console windows
+- **Ollama integration** - Fixed provider resolution for local models
+- **Custom endpoint support** - Enhanced detection for OpenAI-compatible APIs
+- **Windows path handling** - Proper handling of Windows file paths
+- **PowerShell scripts** - Windows-native automation scripts
+
+## Ollama Integration on Windows
+
+WinHermes includes improved Ollama support for Windows users:
+
+```yaml
+# ~/.hermes/config.yaml
+model:
+  default: qwen3.5:4b
+  provider: custom
+  base_url: http://localhost:11434/v1
+```
+
+```batch
+# Run with Ollama
+hermes --model qwen3.5:4b --base-url http://localhost:11434/v1
+```
+
+**Fixed Issues:**
+- **Custom provider resolution now correctly returns `provider: "openai"` for OpenAI-compatible endpoints**
+- **Generic endpoint detection properly identifies non-OpenRouter URLs**
+- **Base URL configuration added for custom providers**
+- **Model format fixed for LiteLLM compatibility (no `ollama/` prefix needed)**
+
+**Note:** Some models (like qwen3.5:4b) don't support function calling. Use tool-compatible models like Llama 3.1 for full tool support.
+
+## Recent Windows Updates
+
+- **Added Windows code execution support** - Full sandboxed Python execution with cross-platform IPC abstraction
+- **Implemented Windows named pipes** - Secure IPC transport using pywin32 with ACLs and authentication
+- **Cross-platform IPC abstraction** - Unix domain sockets (Linux/macOS), named pipes (Windows), TCP fallback
+- **Windows process sandboxing** - Proper process isolation with hidden console windows and security
+- **Fixed custom provider resolution** - Custom endpoints now correctly return `provider: "openai"` instead of hardcoded `"openrouter"`
+- **Enhanced endpoint detection** - Generic fallback now detects endpoint type based on URL
+- **Ollama integration** - Full support for local Ollama models with proper configuration
+- **Windows path handling** - Improved file path handling for Windows environments
+- **Telegram gateway fixes** - Resolved media path errors on Windows
+
+## Configuration Examples
+
+### Custom Provider (Ollama) Configuration
+```yaml
+# ~/.hermes/config.yaml
+model:
+  default: llama3.1:8b
+  provider: custom
+  base_url: http://localhost:11434/v1
+
+# Environment variables (.env)
+OPENAI_API_KEY=dummy-key
+OPENAI_BASE_URL=http://localhost:11434/v1
+```
+
+### Direct Command Line Usage
+```batch
+# Using Ollama with a tool-compatible model
+hermes --model llama3.1:8b --base-url http://localhost:11434/v1
+
+# Using OpenRouter
+hermes --model openrouter:meta-llama/llama-3.1-8b-instruct
+
+# Using custom endpoint
+hermes --model custom:gpt-4o --base-url https://api.example.com/v1
+```
+
 ## Known Limitations on Windows
 
 1. **Code Execution Tool** — **NOW ENABLED**. Requires `pywin32` for named pipe support (falls back to TCP if not installed).
 2. **Docker/Modal/Singularity environments** — Work but require their respective Windows installations.
 3. **PTY mode** — Uses `pywinpty` (automatically installed). Some interactive CLI tools may behave differently.
 4. **File paths** — Hermes uses forward slashes internally (bash-compatible). Windows backslash paths work for Python file operations.
+5. **Some models** (e.g., qwen3.5:4b in Ollama) don't support function calling through OpenAI API format.
+6. **Telegram gateway** may show media path errors for invalid MEDIA: tags (cosmetic issue).
+7. **Model-specific parameters** (like thinking mode) may not be exposed through all providers.
 
 ## Environment Variables
 
