@@ -196,7 +196,7 @@ hermes --model custom:gpt-4o --base-url https://api.example.com/v1
 
 ## Environment Variables
 
-- `HERMES_HOME` — Override the config directory (default: `%USERPROFILE%\.hermes`)
+- `HERMES_HOME` — Override config directory (default: `%USERPROFILE%\.hermes`)
 - `HERMES_GIT_BASH_PATH` — Override Git Bash location if auto-detection fails
 - The setup batch file sets `HERMES_GIT_BASH_PATH` in the launcher script
 
@@ -207,12 +207,12 @@ hermes --model custom:gpt-4o --base-url https://api.example.com/v1
 
 **"hermes is not recognized"**
 → Add `%USERPROFILE%\.local\bin` to your PATH, or use the full path:
-  `F:\AI\hermes-agent\venv\Scripts\hermes.exe`
+  `F:\AI\winhermes-agent\venv\Scripts\hermes.exe`
 
-**Terminal commands fail with path errors**
+**"Terminal commands fail with path errors"**
 → Ensure Git for Windows is installed and `bash.exe` is accessible
 
-**Permission errors on .hermes directory**
+**"Permission errors on .hermes directory"**
 → Run `hermes setup` once to create the directory structure with correct permissions
 
 **Fork guide**
@@ -220,3 +220,28 @@ hermes --model custom:gpt-4o --base-url https://api.example.com/v1
 git remote add upstream https://github.com/NousResearch/hermes-agent.git
 git pull upstream main
 ```
+
+## Success Story: Code Execution on Windows
+
+**Successfully enabled qwen3.5:9b with tool calling!**
+
+After implementing Windows code execution support with cross-platform IPC abstraction:
+
+- qwen3.5:9b model can now successfully call tools like `terminal()`, `read_file()`, `write_file()`
+- Agent can execute multi-step Python scripts in a sandboxed environment
+- Uses Windows named pipes (with pywin32) for secure IPC
+- Falls back to TCP localhost if pywin32 is not available
+
+**Configuration that works:**
+```yaml
+model:
+  default: qwen3.5:9b
+  provider: custom
+  base_url: http://localhost:11434/v1
+```
+
+**Example successful tool call:**
+```python
+# Agent can now run this in execute_code:
+result = terminal("ls -la")
+print(f"Found {len(result.split())} files")
