@@ -1,6 +1,6 @@
 # Hermes Agent - Windows Native Setup
 
-This is a Windows-native port of the Hermes Agent, located at `F:\AI\hermes-agent`.
+This is a Windows-native port of the Hermes Agent, located at `F:\AI\winhermes-agent`.
 
 ## Prerequisites
 
@@ -15,7 +15,7 @@ This is a Windows-native port of the Hermes Agent, located at `F:\AI\hermes-agen
 ## Quick Setup
 
 ```batch
-cd F:\AI\hermes-agent
+cd F:\AI\winhermes-agent
 setup-hermes.bat
 ```
 
@@ -37,7 +37,7 @@ hermes
 Or if `hermes` isn't on PATH yet:
 
 ```batch
-F:\AI\hermes-agent\venv\Scripts\hermes.exe
+F:\AI\winhermes-agent\venv\Scripts\hermes.exe
 ```
 
 ## Configuration
@@ -71,12 +71,11 @@ The following files were modified for Windows compatibility:
 These files already contained Windows compatibility code:
 - `tools/terminal_tool.py` — `msvcrt` for password input
 - `tools/process_registry.py` — `_IS_WINDOWS` flag, guarded `preexec_fn`
-- `tools/code_execution_tool.py` — **NOW ENABLED ON WINDOWS** - Full sandboxed Python execution with cross-platform IPC
-- Uses named pipes on Windows (pywin32) with security ACLs
-- Falls back to TCP localhost if pywin32 not available
-- Unix domain sockets on Linux/macOS, TCP fallback everywhere
-- Windows process creation with hidden console windows
-- Cross-platform endpoint generation and environment passing
+- `tools/code_execution_tool.py` — **NOW ENABLED ON WINDOWS** - Full sandboxed Python execution with cross-platform IPC abstraction
+- **Cross-platform IPC abstraction** - Uses Unix domain sockets on Linux/macOS, named pipes on Windows (via pywin32), with TCP fallback
+- **Windows sandbox support** - Full sandboxed Python execution with proper process isolation
+- **Named pipe implementation** - Secure IPC using pywin32 with ACLs and authentication tokens
+- **TCP fallback** - Works even when pywin32 is not available
 - `hermes_cli/auth.py` — `fcntl`/`msvcrt` fallback
 - `cron/scheduler.py` — `fcntl`/`msvcrt` fallback
 - `pyproject.toml` — `pywinpty` for Windows PTY support
@@ -186,7 +185,7 @@ hermes --model custom:gpt-4o --base-url https://api.example.com/v1
 
 ## Known Limitations on Windows
 
-1. **Code Execution Tool** — **NOW ENABLED**. Requires `pywin32` for named pipe support (falls back to TCP if not installed).
+1. **Code Execution Tool** — **ENABLED with cross-platform IPC**. Requires `pywin32` for named pipe support (falls back to TCP if not installed).
 2. **Docker/Modal/Singularity environments** — Work but require their respective Windows installations.
 3. **PTY mode** — Uses `pywinpty` (automatically installed). Some interactive CLI tools may behave differently.
 4. **File paths** — Hermes uses forward slashes internally (bash-compatible). Windows backslash paths work for Python file operations.

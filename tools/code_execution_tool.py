@@ -14,7 +14,7 @@ Architecture:
   5. Only the script's stdout is returned to the LLM; intermediate tool
      results never enter the context window
 
-Platform: Linux / macOS only (Unix domain sockets). Disabled on Windows.
+Platform: Cross-platform (Linux/macOS/Windows). Uses IPC abstraction layer with Unix domain sockets on Linux/macOS, named pipes on Windows, and TCP fallback everywhere.
 """
 
 import json
