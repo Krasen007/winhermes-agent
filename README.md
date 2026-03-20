@@ -242,10 +242,11 @@ Quick start for Windows contributors:
 git clone https://github.com/Krasen007/winhermes-agent.git
 cd winhermes-agent
 git submodule update --init mini-swe-agent   # required terminal backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e ".[all,dev]"
-pip install -e "./mini-swe-agent"
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv venv venv --python 3.11
+source venv/bin/activate
+uv pip install -e ".[all,dev]"
+uv pip install -e "./mini-swe-agent"
 python -m pytest tests/ -q
 ```
 

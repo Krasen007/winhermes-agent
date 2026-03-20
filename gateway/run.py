@@ -267,6 +267,12 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 
 logger = logging.getLogger(__name__)
 
+# Sentinel placed into _running_agents immediately when a session starts
+# processing, *before* any await.  Prevents a second message for the same
+# session from bypassing the "already running" guard during the async gap
+# between the guard check and actual agent creation.
+_AGENT_PENDING_SENTINEL = object()
+
 
 def _resolve_runtime_agent_kwargs() -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances."""
@@ -1173,6 +1179,8 @@ class GatewayRunner:
         self._running = False
 
         for session_key, agent in list(self._running_agents.items()):
+            if agent is _AGENT_PENDING_SENTINEL:
+                continue
             try:
                 agent.interrupt("Gateway shutting down")
                 logger.debug(
@@ -1367,6 +1375,15 @@ class GatewayRunner:
                 return None
             return APIServerAdapter(config)
 
+        elif platform == Platform.WEBHOOK:
+            from gateway.platforms.webhook import WebhookAdapter, check_webhook_requirements
+            if not check_webhook_requirements():
+                logger.warning("Webhook: aiohttp not installed")
+                return None
+            adapter = WebhookAdapter(config)
+            adapter.gateway_runner = self  # For cross-platform delivery
+            return adapter
+
         return None
 
     def _is_user_authorized(self, source: SessionSource) -> bool:
@@ -1383,7 +1400,9 @@ class GatewayRunner:
         # Home Assistant events are system-generated (state changes), not
         # user-initiated messages.  The HASS_TOKEN already authenticates the
         # connection, so HA events are always authorized.
-        if source.platform == Platform.HOMEASSISTANT:
+        # Webhook events are authenticated via HMAC signature validation in
+        # the adapter itself — no user allowlist applies.
+        if source.platform in (Platform.HOMEASSISTANT, Platform.WEBHOOK):
             return True
 
         user_id = source.user_id
@@ -1531,6 +1550,48 @@ class GatewayRunner:
             if event.get_command() == "status":
                 return await self._handle_status_command(event)
 
+            # /reset and /new must bypass the running-agent guard so they
+            # actually dispatch as commands instead of being queued as user
+            # text (which would be fed back to the agent with the same
+            # broken history — #2170).  Interrupt the agent first, then
+            # clear the adapter's pending queue so the stale "/reset" text
+            # doesn't get re-processed as a user message after the
+            # interrupt completes.
+            from hermes_cli.commands import resolve_command as _resolve_cmd_inner
+            _evt_cmd = event.get_command()
+            _cmd_def_inner = _resolve_cmd_inner(_evt_cmd) if _evt_cmd else None
+            if _cmd_def_inner and _cmd_def_inner.name == "new":
+                running_agent = self._running_agents.get(_quick_key)
+                if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+                    running_agent.interrupt("Session reset requested")
+                # Clear any pending messages so the old text doesn't replay
+                adapter = self.adapters.get(source.platform)
+                if adapter and hasattr(adapter, 'get_pending_message'):
+                    adapter.get_pending_message(_quick_key)  # consume and discard
+                self._pending_messages.pop(_quick_key, None)
+                # Clean up the running agent entry so the reset handler
+                # doesn't think an agent is still active.
+                if _quick_key in self._running_agents:
+                    del self._running_agents[_quick_key]
+                return await self._handle_reset_command(event)
+
+            # /queue <prompt> — queue without interrupting
+            if event.get_command() in ("queue", "q"):
+                queued_text = event.get_command_args().strip()
+                if not queued_text:
+                    return "Usage: /queue <prompt>"
+                adapter = self.adapters.get(source.platform)
+                if adapter:
+                    from gateway.platforms.base import MessageEvent as _ME, MessageType as _MT
+                    queued_event = _ME(
+                        text=queued_text,
+                        message_type=_MT.TEXT,
+                        source=event.source,
+                        message_id=event.message_id,
+                    )
+                    adapter._pending_messages[_quick_key] = queued_event
+                return "Queued for the next turn."
+
             if event.message_type == MessageType.PHOTO:
                 logger.debug(
                     "PRIORITY photo follow-up for session %s — queueing without interrupt",
@@ -1557,7 +1618,18 @@ class GatewayRunner:
                         adapter._pending_messages[_quick_key] = event
                 return None
 
-            running_agent = self._running_agents[_quick_key]
+            running_agent = self._running_agents.get(_quick_key)
+            if running_agent is _AGENT_PENDING_SENTINEL:
+                # Agent is being set up but not ready yet.
+                if event.get_command() == "stop":
+                    # Nothing to interrupt — agent hasn't started yet.
+                    return "⏳ The agent is still starting up — nothing to stop yet."
+                # Queue the message so it will be picked up after the
+                # agent starts.
+                adapter = self.adapters.get(source.platform)
+                if adapter:
+                    adapter._pending_messages[_quick_key] = event
+                return None
             logger.debug("PRIORITY interrupt for session %s", _quick_key[:20])
             running_agent.interrupt(event.text)
             if _quick_key in self._pending_messages:
@@ -1744,34 +1816,32 @@ class GatewayRunner:
                         # Fall through to normal message processing with skill content
             except Exception as e:
                 logger.debug("Skill command check failed (non-fatal): %s", e)
+        
+        # Pending exec approvals are handled by /approve and /deny commands above.
+        # No bare text matching — "yes" in normal conversation must not trigger
+        # execution of a dangerous command.
 
-        # Check for pending exec approval responses
-        session_key_preview = self._session_key_for_source(source)
-        if session_key_preview in self._pending_approvals:
-            user_text = event.text.strip().lower()
-            if user_text in ("yes", "y", "approve", "ok", "go", "do it"):
-                approval = self._pending_approvals.pop(session_key_preview)
-                cmd = approval["command"]
-                pattern_keys = approval.get("pattern_keys", [])
-                if not pattern_keys:
-                    pk = approval.get("pattern_key", "")
-                    pattern_keys = [pk] if pk else []
-                logger.info("User approved dangerous command: %s...", cmd[:60])
-                from tools.terminal_tool import terminal_tool
-                from tools.approval import approve_session
+        # ── Claim this session before any await ───────────────────────
+        # Between here and _run_agent registering the real AIAgent, there
+        # are numerous await points (hooks, vision enrichment, STT,
+        # session hygiene compression).  Without this sentinel a second
+        # message arriving during any of those yields would pass the
+        # "already running" guard and spin up a duplicate agent for the
+        # same session — corrupting the transcript.
+        self._running_agents[_quick_key] = _AGENT_PENDING_SENTINEL
 
-                for pk in pattern_keys:
-                    approve_session(session_key_preview, pk)
-                result = terminal_tool(command=cmd, force=True)
-                return f"✅ Command approved and executed.\n\n```\n{result[:3500]}\n```"
-            elif user_text in ("no", "n", "deny", "cancel", "nope"):
-                self._pending_approvals.pop(session_key_preview)
-                return "❌ Command denied."
-            elif user_text in ("full", "show", "view", "show full", "view full"):
-                # Show full command without consuming the approval
-                cmd = self._pending_approvals[session_key_preview]["command"]
-                return f"Full command:\n\n```\n{cmd}\n```\n\nReply yes/no to approve or deny."
-            # If it's not clearly an approval/denial, fall through to normal processing
+        try:
+            return await self._handle_message_with_agent(event, source, _quick_key)
+        finally:
+            # If _run_agent replaced the sentinel with a real agent and
+            # then cleaned it up, this is a no-op.  If we exited early
+            # (exception, command fallthrough, etc.) the sentinel must
+            # not linger or the session would be permanently locked out.
+            if self._running_agents.get(_quick_key) is _AGENT_PENDING_SENTINEL:
+                del self._running_agents[_quick_key]
+
+    async def _handle_message_with_agent(self, event, source, _quick_key: str):
+        """Inner handler that runs under the _running_agents sentinel guard."""
 
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
@@ -2564,9 +2634,11 @@ class GatewayRunner:
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
-
-        if session_key in self._running_agents:
-            agent = self._running_agents[session_key]
+        
+        agent = self._running_agents.get(session_key)
+        if agent is _AGENT_PENDING_SENTINEL:
+            return "⏳ The agent is still starting up — nothing to stop yet."
+        if agent:
             agent.interrupt()
             return "⚡ Stopping the current task... The agent will finish its current step and respond."
         else:
@@ -4836,6 +4908,26 @@ class GatewayRunner:
             except Exception as _e:
                 logger.debug("agent:step hook error: %s", _e)
 
+        # Bridge sync status_callback → async adapter.send for context pressure
+        _status_adapter = self.adapters.get(source.platform)
+        _status_chat_id = source.chat_id
+        _status_thread_metadata = {"thread_id": source.thread_id} if source.thread_id else None
+
+        def _status_callback_sync(event_type: str, message: str) -> None:
+            if not _status_adapter:
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _status_adapter.send(
+                        _status_chat_id,
+                        message,
+                        metadata=_status_thread_metadata,
+                    ),
+                    _loop_for_step,
+                )
+            except Exception as _e:
+                logger.debug("status_callback error (%s): %s", event_type, _e)
+
         def run_sync():
             # Pass session_key to process registry via env var so background
             # processes can be mapped back to this gateway session
@@ -4943,6 +5035,7 @@ class GatewayRunner:
                 else None,
                 step_callback=_step_callback_sync if _hooks_ref.loaded_hooks else None,
                 stream_delta_callback=_stream_delta_cb,
+                status_callback=_status_callback_sync,
                 platform=platform_key,
                 honcho_session_key=session_key,
                 honcho_manager=honcho_manager,
