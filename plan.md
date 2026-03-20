@@ -355,3 +355,143 @@ python hermes config
 ❌ Tools not supported by qwen3.5:4b model  
 
 The integration is technically complete. The limitation is with the model itself, not hermes-agent.
+
+---
+
+# Image Generation Tool Debug Session Summary
+
+**Date:** March 20, 2026  
+**Issue:** User cannot use image generation despite tool being available  
+**Status:** Tool Available - Model Refuses to Use Tools
+
+## Problem Description
+
+User reported that when asking the agent to generate images, the qwen3.5:9b model responds with "I cannot generate images - I'm a text-only AI assistant" even though the `image_generate` tool is loaded and available.
+
+## Investigation Findings
+
+### 1. Tool Registration Status ✅
+- The `image_generate` tool IS properly registered in the tool registry
+- It's included in the `_HERMES_CORE_TOOLS` list
+- The `image_gen` toolset is defined and includes the `image_generate` tool
+- When querying the registry, the tool is found and available
+
+### 2. Configuration Status ✅
+- User's config has `platform_toolsets.cli` correctly including `image_gen`
+- CLI loads the correct toolsets from config
+- Tools are successfully passed to the AIAgent constructor
+
+### 3. API Key Issue - FIXED ✅
+**Problem:** The `image_generation_tool.py` was using `os.getenv("FAL_KEY")` directly, which doesn't read from Hermes' `.env` file.
+
+**Solution Applied:** Modified the tool to use Hermes' `load_env()` function:
+```python
+# In tools/image_generation_tool.py
+from hermes_cli.config import load_env
+
+# Modified image_generate_tool function
+env_vars = load_env()
+fal_key = env_vars.get("FAL_KEY")
+if not fal_key:
+    raise ValueError("FAL_KEY environment variable not set")
+
+# Set the key for fal_client
+os.environ["FAL_KEY"] = fal_key
+```
+
+### 4. Tool Execution Test ✅
+When called directly, the tool works correctly:
+```python
+from tools.image_generation_tool import image_generate_tool
+result = image_generate_tool('A test image')
+```
+Returns: `{'success': False, 'image': None}` with error "User is locked. Reason: Exhausted balance"
+- This proves the tool IS working
+- The FAL API key is correctly loaded
+- The error is about account balance, not tool availability
+
+### 5. Agent Tool Loading ✅
+Verified that the agent has the tool loaded:
+```python
+agent = AIAgent(model='qwen3.5:9b', base_url='http://localhost:11434/v1')
+print('Agent tools:', len(agent.tools))  # 31 tools
+print('Has image_generate:', any(t['function']['name'] == 'image_generate' for t in agent.tools))  # True
+```
+
+### 6. Root Cause: Model Behavior ❌
+The qwen3.5:9b model, despite having "tools" in its capabilities, responds that it's text-only when asked to generate images. This is a model-specific behavior, not a hermes-agent issue.
+
+**Evidence:**
+- Tools are properly passed to the model in API calls
+- Model has "tools" capability according to Ollama API
+- Model chooses to respond with text-only refusal instead of using tools
+- This is consistent with qwen3.5:4b behavior seen previously
+
+## Solutions Implemented
+
+1. **Fixed FAL_KEY loading** in `image_generation_tool.py` to use Hermes' config system
+2. **Verified tool availability** throughout the stack
+3. **Confirmed API key access** to FAL.ai
+
+## Recommendations
+
+### For Image Generation
+
+1. **Top up FAL.ai balance** at https://fal.ai/dashboard/billing
+   - The tool works, just needs funds
+   - Current error: "Exhausted balance"
+
+2. **Use a different model** that respects tool calling:
+   - Models that work better with tools
+   - Consider using OpenRouter with a tool-capable model
+
+3. **Add explicit tool instructions** to system prompt:
+   - "You have access to image generation tools"
+   - "Use tools when appropriate to fulfill user requests"
+
+### General Tool Usage
+
+1. **Model selection is critical** for tool functionality
+2. **Local models via Ollama** may have inconsistent tool support
+3. **Cloud providers** (OpenRouter, Anthropic) have better tool integration
+
+## Files Modified
+
+1. `tools/image_generation_tool.py` - Fixed FAL_KEY loading using `load_env()`
+
+## Test Commands
+
+```bash
+# Check tool registration
+python -c "from tools.registry import registry; print('Image generate in tools:', 'image_generate' in registry._tools)"
+
+# Check toolset availability
+python -c "from tools.registry import registry; print('Toolset available:', registry.is_toolset_available('image_gen'))"
+
+# Test tool directly
+python -c "from tools.image_generation_tool import image_generate_tool; import json; result = image_generate_tool('test'); print(json.loads(result))"
+
+# Check agent tools
+python -c "from run_agent import AIAgent; agent = AIAgent(model='qwen3.5:9b', base_url='http://localhost:11434/v1'); print('Tools:', len(agent.tools))"
+```
+
+## Key Insights
+
+- The tool system IS working correctly
+- Tools ARE registered and available
+- The model IS receiving the tool definitions
+- The model CHOOSES not to use tools (model-specific behavior)
+- FAL API integration works, just needs account balance
+
+## Current Status
+
+✅ Tool registration complete  
+✅ Configuration correct  
+✅ API key loading fixed  
+✅ Tool functional when called directly  
+❌ Model refuses to use tools (qwen3.5 limitation)  
+❌ FAL account balance exhausted  
+
+The image generation feature is technically ready. The barriers are:
+1. Model willingness to use tools
+2. FAL account balance

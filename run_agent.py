@@ -4123,36 +4123,45 @@ class AIAgent:
                     max_tokens=5120,
                     timeout=30.0,
                 )
-            except RuntimeError:
+            except (RuntimeError, KeyboardInterrupt):
                 _aux_available = False
                 response = None
 
             if not _aux_available and self.api_mode == "codex_responses":
                 # No auxiliary client -- use the Codex Responses path directly
-                codex_kwargs = self._build_api_kwargs(api_messages)
-                codex_kwargs["tools"] = self._responses_tools([memory_tool_def])
-                codex_kwargs["temperature"] = 0.3
-                if "max_output_tokens" in codex_kwargs:
-                    codex_kwargs["max_output_tokens"] = 5120
-                response = self._run_codex_stream(codex_kwargs)
+                try:
+                    codex_kwargs = self._build_api_kwargs(api_messages)
+                    codex_kwargs["tools"] = self._responses_tools([memory_tool_def])
+                    codex_kwargs["temperature"] = 0.3
+                    if "max_output_tokens" in codex_kwargs:
+                        codex_kwargs["max_output_tokens"] = 5120
+                    response = self._run_codex_stream(codex_kwargs)
+                except KeyboardInterrupt:
+                    response = None
             elif not _aux_available and self.api_mode == "anthropic_messages":
                 # Native Anthropic — use the Anthropic client directly
-                from agent.anthropic_adapter import build_anthropic_kwargs as _build_ant_kwargs
-                ant_kwargs = _build_ant_kwargs(
-                    model=self.model, messages=api_messages,
-                    tools=[memory_tool_def], max_tokens=5120,
-                    reasoning_config=None,
-                )
-                response = self._anthropic_messages_create(ant_kwargs)
+                try:
+                    from agent.anthropic_adapter import build_anthropic_kwargs as _build_ant_kwargs
+                    ant_kwargs = _build_ant_kwargs(
+                        model=self.model, messages=api_messages,
+                        tools=[memory_tool_def], max_tokens=5120,
+                        reasoning_config=None,
+                    )
+                    response = self._anthropic_messages_create(ant_kwargs)
+                except KeyboardInterrupt:
+                    response = None
             elif not _aux_available:
-                api_kwargs = {
-                    "model": self.model,
-                    "messages": api_messages,
-                    "tools": [memory_tool_def],
-                    "temperature": 0.3,
-                    **self._max_tokens_param(5120),
-                }
-                response = self._ensure_primary_openai_client(reason="flush_memories").chat.completions.create(**api_kwargs, timeout=30.0)
+                try:
+                    api_kwargs = {
+                        "model": self.model,
+                        "messages": api_messages,
+                        "tools": [memory_tool_def],
+                        "temperature": 0.3,
+                        **self._max_tokens_param(5120),
+                    }
+                    response = self._ensure_primary_openai_client(reason="flush_memories").chat.completions.create(**api_kwargs, timeout=30.0)
+                except KeyboardInterrupt:
+                    response = None
 
             # Extract tool calls from the response, handling all API formats
             tool_calls = []

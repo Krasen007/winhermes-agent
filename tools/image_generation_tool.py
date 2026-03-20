@@ -35,6 +35,7 @@ import datetime
 from typing import Dict, Any, Optional, Union
 import fal_client
 from tools.debug_helpers import DebugSession
+from hermes_cli.config import load_env
 
 logger = logging.getLogger(__name__)
 
@@ -280,8 +281,13 @@ def image_generate_tool(
             raise ValueError("Prompt is required and must be a non-empty string")
         
         # Check API key availability
-        if not os.getenv("FAL_KEY"):
+        env_vars = load_env()
+        fal_key = env_vars.get("FAL_KEY")
+        if not fal_key:
             raise ValueError("FAL_KEY environment variable not set")
+        
+        # Set the key for fal_client
+        os.environ["FAL_KEY"] = fal_key
         
         # Validate other parameters
         validated_params = _validate_parameters(
@@ -400,7 +406,8 @@ def check_fal_api_key() -> bool:
     Returns:
         bool: True if API key is set, False otherwise
     """
-    return bool(os.getenv("FAL_KEY"))
+    env_vars = load_env()
+    return bool(env_vars.get("FAL_KEY"))
 
 
 def check_image_generation_requirements() -> bool:

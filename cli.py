@@ -6850,7 +6850,7 @@ class HermesCLI:
             if self.agent and self.conversation_history:
                 try:
                     self.agent.flush_memories(self.conversation_history)
-                except Exception:
+                except (Exception, KeyboardInterrupt):
                     pass
             # Shut down voice recorder (release persistent audio stream)
             if hasattr(self, '_voice_recorder') and self._voice_recorder:
