@@ -215,6 +215,22 @@ hermes --model custom:gpt-4o --base-url https://api.example.com/v1
 **"Permission errors on .hermes directory"**
 → Run `hermes setup` once to create the directory structure with correct permissions
 
+**"Ollama connection failed"**
+→ Check if Ollama is running: `ollama list`
+→ Verify URL: http://localhost:11434/v1
+→ Check firewall isn't blocking port 11434
+→ Try different model if qwen3.5:9b doesn't support function calling
+
+**"Model not found"**
+→ Check model was pulled: `ollama list`
+→ Pull with: `ollama pull qwen3.5:9b`
+→ Verify in: `C:\\ollama\models`
+
+**"Docker port conflicts"**
+→ Stop conflicting services on port 11434
+→ Use different port: `-p 11435:11435`
+→ Update Hermes config accordingly
+
 **Fork guide**
 ```bash
 git remote add upstream https://github.com/NousResearch/hermes-agent.git
