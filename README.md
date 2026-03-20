@@ -63,18 +63,6 @@ source ~/.bashrc    # reload shell (or: source ~/.zshrc)
 hermes              # start chatting!
 ```
 
-### Windows-Specific Features
-
-- ✅ **Native Windows support** - No WSL2 required
-- ✅ **Code execution on Windows** - Full sandboxed Python execution with named pipes or TCP fallback
-- ✅ **Cross-platform IPC abstraction** - Unix domain sockets (Linux/macOS), named pipes (Windows), TCP fallback
-- ✅ **Windows process sandboxing** - Proper process isolation with hidden console windows
-- ✅ **Ollama integration** - Fixed provider resolution for local models
-- ✅ **Custom endpoint support** - Enhanced detection for OpenAI-compatible APIs
-- ✅ **Windows path handling** - Proper handling of Windows file paths
-- ✅ **PowerShell scripts** - Windows-native automation scripts
-
----
 
 ## Getting Started
 
@@ -90,34 +78,6 @@ hermes update       # Update to the latest version
 hermes doctor       # Diagnose any issues
 ```
 
-### Ollama Integration on Windows
-
-WinHermes includes improved Ollama support for Windows users:
-
-```yaml
-# ~/.hermes/config.yaml
-model:
-  default: qwen3.5:4b
-  provider: custom
-  base_url: http://localhost:11434/v1
-```
-
-```batch
-# Run with Ollama
-hermes --model qwen3.5:4b --base-url http://localhost:11434/v1
-```
-
-**Fixed Issues:**
-- ✅ Custom provider resolution now correctly returns `provider: "openai"` for OpenAI-compatible endpoints
-- ✅ Generic endpoint detection properly identifies non-OpenRouter URLs
-- ✅ Base URL configuration added for custom providers
-- ✅ Model format fixed for LiteLLM compatibility (no `ollama/` prefix needed)
-
-**Note:** Some models (like qwen3.5:4b) don't support function calling. Use tool-compatible models like Llama 3.1 for full tool support.
-
-📖 **[Full documentation →](https://hermes-agent.nousresearch.com/docs/)**
-
-## CLI vs Messaging Quick Reference
 
 Hermes has two entry points: start the terminal UI with `hermes`, or run the gateway and talk to it from Telegram, Discord, Slack, WhatsApp, Signal, or Email. Once you're in a conversation, many slash commands are shared across both interfaces.
 
@@ -135,56 +95,6 @@ Hermes has two entry points: start the terminal UI with `hermes`, or run the gat
 
 For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
 
----
-
-## Recent Updates & Fixes
-
-### Windows-Specific Improvements
-
-- **Added Windows code execution support** - Full sandboxed Python execution with cross-platform IPC abstraction
-- **Implemented Windows named pipes** - Secure IPC transport using pywin32 with ACLs and authentication
-- **Cross-platform IPC abstraction** - Unix domain sockets (Linux/macOS), named pipes (Windows), TCP fallback
-- **Windows process sandboxing** - Proper process isolation with hidden console windows and security
-- **Fixed custom provider resolution** - Custom endpoints now correctly return `provider: "openai"` instead of hardcoded `"openrouter"`
-- **Enhanced endpoint detection** - Generic fallback now detects endpoint type based on URL
-- **Ollama integration** - Full support for local Ollama models with proper configuration
-- **Windows path handling** - Improved file path handling for Windows environments
-- **Telegram gateway fixes** - Resolved media path errors on Windows
-
-### Configuration Examples
-
-#### Custom Provider (Ollama) Configuration
-```yaml
-# ~/.hermes/config.yaml
-model:
-  default: llama3.1:8b
-  provider: custom
-  base_url: http://localhost:11434/v1
-
-# Environment variables (.env)
-OPENAI_API_KEY=dummy-key
-OPENAI_BASE_URL=http://localhost:11434/v1
-```
-
-#### Direct Command Line Usage
-```batch
-# Using Ollama with a tool-compatible model
-hermes --model llama3.1:8b --base-url http://localhost:11434/v1
-
-# Using OpenRouter
-hermes --model openrouter:meta-llama/llama-3.1-8b-instruct
-
-# Using custom endpoint
-hermes --model custom:gpt-4o --base-url https://api.example.com/v1
-```
-
-### Known Limitations
-
-- Some models (e.g., qwen3.5:4b in Ollama) don't support function calling through the OpenAI API format
-- Telegram gateway may show media path errors for invalid MEDIA: tags (cosmetic issue)
-- Model-specific parameters (like thinking mode) may not be exposed through all providers
-- Code execution on Windows requires `pywin32` for named pipe support (falls back to TCP if not installed)
-- Code execution sandbox uses TCP fallback on systems without native IPC support
 
 ---
 
