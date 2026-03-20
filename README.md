@@ -66,6 +66,9 @@ hermes              # start chatting!
 ### Windows-Specific Features
 
 - ✅ **Native Windows support** - No WSL2 required
+- ✅ **Code execution on Windows** - Full sandboxed Python execution with named pipes or TCP fallback
+- ✅ **Cross-platform IPC abstraction** - Unix domain sockets (Linux/macOS), named pipes (Windows), TCP fallback
+- ✅ **Windows process sandboxing** - Proper process isolation with hidden console windows
 - ✅ **Ollama integration** - Fixed provider resolution for local models
 - ✅ **Custom endpoint support** - Enhanced detection for OpenAI-compatible APIs
 - ✅ **Windows path handling** - Proper handling of Windows file paths
@@ -138,6 +141,10 @@ For the full command lists, see the [CLI guide](https://hermes-agent.nousresearc
 
 ### Windows-Specific Improvements
 
+- **Added Windows code execution support** - Full sandboxed Python execution with cross-platform IPC abstraction
+- **Implemented Windows named pipes** - Secure IPC transport using pywin32 with ACLs and authentication
+- **Cross-platform IPC abstraction** - Unix domain sockets (Linux/macOS), named pipes (Windows), TCP fallback
+- **Windows process sandboxing** - Proper process isolation with hidden console windows and security
 - **Fixed custom provider resolution** - Custom endpoints now correctly return `provider: "openai"` instead of hardcoded `"openrouter"`
 - **Enhanced endpoint detection** - Generic fallback now detects endpoint type based on URL
 - **Ollama integration** - Full support for local Ollama models with proper configuration
@@ -176,6 +183,8 @@ hermes --model custom:gpt-4o --base-url https://api.example.com/v1
 - Some models (e.g., qwen3.5:4b in Ollama) don't support function calling through the OpenAI API format
 - Telegram gateway may show media path errors for invalid MEDIA: tags (cosmetic issue)
 - Model-specific parameters (like thinking mode) may not be exposed through all providers
+- Code execution on Windows requires `pywin32` for named pipe support (falls back to TCP if not installed)
+- Code execution sandbox uses TCP fallback on systems without native IPC support
 
 ---
 
@@ -247,6 +256,8 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -e ".[all,dev]"
 pip install -e "./mini-swe-agent"
+# Optional: Install pywin32 for full Windows code execution support
+pip install pywin32
 python -m pytest tests/ -q
 ```
 
