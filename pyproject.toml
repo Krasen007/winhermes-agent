@@ -29,6 +29,8 @@ dependencies = [
   "firecrawl-py",
   "parallel-web>=0.4.2",
   "fal-client",
+  # Windows code execution support
+  "pywin32>=227; sys_platform=='win32'",
   # Text-to-speech (Edge TTS is free, no API key needed)
   "edge-tts",
   "faster-whisper>=1.0.0",

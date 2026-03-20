@@ -33,10 +33,15 @@ import uuid
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional
 
-# Availability gate: UDS requires a POSIX OS
+# Import IPC abstraction layer
+from .ipc_base import get_ipc_transport, check_ipc_availability
+
+# Availability check for different IPC transports
+ipc_status = check_ipc_availability()
 logger = logging.getLogger(__name__)
 
-SANDBOX_AVAILABLE = sys.platform != "win32"
+# Sandbox is available if we have any working IPC transport
+SANDBOX_AVAILABLE = ipc_status["tcp_available"] or ipc_status["uds_available"] or ipc_status["named_pipes_available"]
 
 # The 7 tools allowed inside the sandbox. The intersection of this list
 # and the session's enabled tools determines which stubs are generated.
@@ -58,7 +63,7 @@ MAX_STDERR_BYTES = 10_000    # 10 KB
 
 
 def check_sandbox_requirements() -> bool:
-    """Code execution sandbox requires a POSIX OS for Unix domain sockets."""
+    """Check if code execution sandbox is available on this platform."""
     return SANDBOX_AVAILABLE
 
 
@@ -137,28 +142,103 @@ def generate_hermes_tools_module(enabled_tools: List[str]) -> str:
 
     header = '''\
 """Auto-generated Hermes tools RPC stubs."""
-import json, os, socket, shlex, time
+import json, os, sys, time
 
-_sock = None
-
-
-# ---------------------------------------------------------------------------
-# Convenience helpers (avoid common scripting pitfalls)
-# ---------------------------------------------------------------------------
-
-def json_parse(text: str):
-    """Parse JSON tolerant of control characters (strict=False).
-    Use this instead of json.loads() when parsing output from terminal()
-    or web_extract() that may contain raw tabs/newlines in strings."""
-    return json.loads(text, strict=False)
-
-
-def shell_quote(s: str) -> str:
-    """Shell-escape a string for safe interpolation into commands.
-    Use this when inserting dynamic content into terminal() commands:
-        terminal(f"echo {shell_quote(user_input)}")
-    """
-    return shlex.quote(s)
+# Import appropriate IPC client
+try:
+    from ipc_base import get_ipc_transport
+except ImportError:
+    # Fallback for when running in sandbox
+    import socket
+    import json
+    
+    # Simple IPC client based on transport type
+    transport_type = os.environ.get("HERMES_IPC_TRANSPORT", "uds")
+    endpoint = os.environ.get("HERMES_IPC_ENDPOINT")
+    
+    if transport_type == "tcp":
+        host, port = endpoint.replace("tcp://", "").split(":")
+        port = int(port)
+        
+        def _connect():
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((host, port))
+            return sock
+    else:
+        # Assume UDS
+        def _connect():
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(endpoint)
+            return sock
+    
+    _sock = None
+    
+    def _call(tool_name, args):
+        global _sock
+        if _sock is None:
+            _sock = _connect()
+        
+        request = json.dumps({"tool": tool_name, "args": args}) + "\\n"
+        _sock.sendall(request.encode())
+        
+        buf = b""
+        while True:
+            chunk = _sock.recv(65536)
+            if not chunk:
+                raise RuntimeError("Agent process disconnected")
+            buf += chunk
+            if buf.endswith(b"\\n"):
+                break
+        
+        raw = buf.decode().strip()
+        result = json.loads(raw)
+        if isinstance(result, str):
+            try:
+                return json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                return result
+        return result
+else:
+    # Use the IPC abstraction layer
+    _transport = None
+    
+    def _get_transport():
+        global _transport
+        if _transport is None:
+            transport_type = os.environ.get("HERMES_IPC_TRANSPORT", "auto")
+            endpoint = os.environ.get("HERMES_IPC_ENDPOINT")
+            
+            if endpoint.startswith("tcp://"):
+                from ipc_base import TCPLocalhost
+                host, port = endpoint.replace("tcp://", "").split(":")
+                _transport = TCPLocalhost(int(port))
+            elif endpoint.startswith("\\\\.\\pipe\\"):
+                from ipc_base import WindowsNamedPipe
+                pipe_name = endpoint.replace("\\\\.\\pipe\\", "")
+                _transport = WindowsNamedPipe(pipe_name)
+            else:
+                from ipc_base import UnixDomainSocket
+                _transport = UnixDomainSocket(endpoint)
+        
+        return _transport
+    
+    def _call(tool_name, args):
+        transport = _get_transport()
+        if not transport.connect():
+            raise RuntimeError("Failed to connect to parent process")
+        
+        request = {"tool": tool_name, "args": args}
+        transport.send(request)
+        
+        response = transport.recv()
+        transport.close()
+        
+        if isinstance(response, str):
+            try:
+                return json.loads(response)
+            except (json.JSONDecodeError, TypeError):
+                return response
+        return response
 
 
 def retry(fn, max_attempts=3, delay=2):
@@ -176,36 +256,6 @@ def retry(fn, max_attempts=3, delay=2):
                 time.sleep(delay * (2 ** attempt))
     raise last_err
 
-def _connect():
-    global _sock
-    if _sock is None:
-        _sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        _sock.connect(os.environ["HERMES_RPC_SOCKET"])
-        _sock.settimeout(300)
-    return _sock
-
-def _call(tool_name, args):
-    """Send a tool call to the parent process and return the parsed result."""
-    conn = _connect()
-    request = json.dumps({"tool": tool_name, "args": args}) + "\\n"
-    conn.sendall(request.encode())
-    buf = b""
-    while True:
-        chunk = conn.recv(65536)
-        if not chunk:
-            raise RuntimeError("Agent process disconnected")
-        buf += chunk
-        if buf.endswith(b"\\n"):
-            break
-    raw = buf.decode().strip()
-    result = json.loads(raw)
-    if isinstance(result, str):
-        try:
-            return json.loads(result)
-        except (json.JSONDecodeError, TypeError):
-            return result
-    return result
-
 '''
 
     return header + "\n".join(stub_functions)
@@ -220,123 +270,93 @@ _TERMINAL_BLOCKED_PARAMS = {"background", "check_interval", "pty"}
 
 
 def _rpc_server_loop(
-    server_sock: socket.socket,
+    ipc_transport,
     task_id: str,
     tool_call_log: list,
-    tool_call_counter: list,   # mutable [int] so the thread can increment
+    tool_call_counter: list,   # mutable [int] so thread can increment
     max_tool_calls: int,
     allowed_tools: frozenset,
 ):
     """
     Accept one client connection and dispatch tool-call requests until
-    the client disconnects or the call limit is reached.
+    client disconnects or call limit is reached.
     """
     from model_tools import handle_function_call
 
-    conn = None
     try:
-        server_sock.settimeout(5)
-        conn, _ = server_sock.accept()
-        conn.settimeout(300)
-
-        buf = b""
-        while True:
+        # Start listening for connections
+        def message_callback(request):
+            """Handle incoming RPC messages."""
+            call_start = time.monotonic()
+            
+            tool_name = request.get("tool", "")
+            tool_args = request.get("args", {})
+            
+            # Enforce allow-list
+            if tool_name not in allowed_tools:
+                available = ", ".join(sorted(allowed_tools))
+                return {
+                    "error": (
+                        f"Tool '{tool_name}' is not available in execute_code. "
+                        f"Available: {available}"
+                    )
+                }
+            
+            # Enforce tool call limit
+            if tool_call_counter[0] >= max_tool_calls:
+                return {
+                    "error": (
+                        f"Tool call limit reached ({max_tool_calls}). "
+                        "No more tool calls allowed in this execution."
+                    )
+                }
+            
+            # Strip forbidden terminal parameters
+            if tool_name == "terminal" and isinstance(tool_args, dict):
+                for param in _TERMINAL_BLOCKED_PARAMS:
+                    tool_args.pop(param, None)
+            
+            # Dispatch through standard tool handler
             try:
-                chunk = conn.recv(65536)
-            except socket.timeout:
-                break
-            if not chunk:
-                break
-            buf += chunk
-
-            # Process all complete newline-delimited messages in the buffer
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-
-                call_start = time.monotonic()
+                _real_stdout, _real_stderr = sys.stdout, sys.stderr
+                sys.stdout = open(os.devnull, "w")
+                sys.stderr = open(os.devnull, "w")
                 try:
-                    request = json.loads(line.decode())
-                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                    resp = json.dumps({"error": f"Invalid RPC request: {exc}"})
-                    conn.sendall((resp + "\n").encode())
-                    continue
-
-                tool_name = request.get("tool", "")
-                tool_args = request.get("args", {})
-
-                # Enforce the allow-list
-                if tool_name not in allowed_tools:
-                    available = ", ".join(sorted(allowed_tools))
-                    resp = json.dumps({
-                        "error": (
-                            f"Tool '{tool_name}' is not available in execute_code. "
-                            f"Available: {available}"
-                        )
-                    })
-                    conn.sendall((resp + "\n").encode())
-                    continue
-
-                # Enforce tool call limit
-                if tool_call_counter[0] >= max_tool_calls:
-                    resp = json.dumps({
-                        "error": (
-                            f"Tool call limit reached ({max_tool_calls}). "
-                            "No more tool calls allowed in this execution."
-                        )
-                    })
-                    conn.sendall((resp + "\n").encode())
-                    continue
-
-                # Strip forbidden terminal parameters
-                if tool_name == "terminal" and isinstance(tool_args, dict):
-                    for param in _TERMINAL_BLOCKED_PARAMS:
-                        tool_args.pop(param, None)
-
-                # Dispatch through the standard tool handler.
-                # Suppress stdout/stderr from internal tool handlers so
-                # their status prints don't leak into the CLI spinner.
+                    result = handle_function_call(
+                        tool_name, tool_args, task_id=task_id
+                    )
+                finally:
+                    sys.stdout.close()
+                    sys.stderr.close()
+                    sys.stdout, sys.stderr = _real_stdout, _real_stderr
+            except Exception as exc:
+                logger.error("Tool call failed in sandbox: %s", exc, exc_info=True)
+                result = json.dumps({"error": str(exc)})
+            
+            tool_call_counter[0] += 1
+            call_duration = time.monotonic() - call_start
+            
+            # Log for observability
+            args_preview = str(tool_args)[:80]
+            tool_call_log.append({
+                "tool": tool_name,
+                "args_preview": args_preview,
+                "duration": round(call_duration, 2),
+            })
+            
+            # Return result (may be JSON string)
+            if isinstance(result, str):
                 try:
-                    _real_stdout, _real_stderr = sys.stdout, sys.stderr
-                    sys.stdout = open(os.devnull, "w")
-                    sys.stderr = open(os.devnull, "w")
-                    try:
-                        result = handle_function_call(
-                            tool_name, tool_args, task_id=task_id
-                        )
-                    finally:
-                        sys.stdout.close()
-                        sys.stderr.close()
-                        sys.stdout, sys.stderr = _real_stdout, _real_stderr
-                except Exception as exc:
-                    logger.error("Tool call failed in sandbox: %s", exc, exc_info=True)
-                    result = json.dumps({"error": str(exc)})
-
-                tool_call_counter[0] += 1
-                call_duration = time.monotonic() - call_start
-
-                # Log for observability
-                args_preview = str(tool_args)[:80]
-                tool_call_log.append({
-                    "tool": tool_name,
-                    "args_preview": args_preview,
-                    "duration": round(call_duration, 2),
-                })
-
-                conn.sendall((result + "\n").encode())
-
-    except socket.timeout:
-        logger.debug("RPC listener socket timeout")
-    except OSError as e:
-        logger.debug("RPC listener socket error: %s", e, exc_info=True)
-    finally:
-        if conn:
-            try:
-                conn.close()
-            except OSError as e:
-                logger.debug("RPC conn close error: %s", e)
+                    return json.loads(result)
+                except (json.JSONDecodeError, TypeError):
+                    return result
+            return result
+        
+        # Start listening with the callback
+        ipc_transport.listen(message_callback)
+        
+    except Exception as e:
+        logger.debug("RPC server error: %s", e, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +383,7 @@ def execute_code(
     """
     if not SANDBOX_AVAILABLE:
         return json.dumps({
-            "error": "execute_code is not available on Windows. Use normal tool calls instead."
+            "error": f"execute_code is not available. Platform: {platform.system()}, IPC available: {ipc_status}"
         })
 
     if not code or not code.strip():
@@ -386,16 +406,14 @@ def execute_code(
 
     # --- Set up temp directory with hermes_tools.py and script.py ---
     tmpdir = tempfile.mkdtemp(prefix="hermes_sandbox_")
-    # Use /tmp on macOS to avoid the long /var/folders/... path that pushes
-    # Unix domain socket paths past the 104-byte macOS AF_UNIX limit.
-    # On Linux, tempfile.gettempdir() already returns /tmp.
-    _sock_tmpdir = "/tmp" if sys.platform == "darwin" else tempfile.gettempdir()
-    sock_path = os.path.join(_sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
-
+    
+    # Create IPC transport endpoint
+    ipc_transport = get_ipc_transport()
+    endpoint = ipc_transport.get_endpoint()
+    
     tool_call_log: list = []
-    tool_call_counter = [0]  # mutable so the RPC thread can increment
+    tool_call_counter = [0]  # mutable so RPC thread can increment
     exec_start = time.monotonic()
-    server_sock = None
 
     try:
         # Write the auto-generated hermes_tools module
@@ -409,15 +427,11 @@ def execute_code(
         with open(os.path.join(tmpdir, "script.py"), "w") as f:
             f.write(code)
 
-        # --- Start UDS server ---
-        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server_sock.bind(sock_path)
-        server_sock.listen(1)
-
+        # --- Start IPC server ---
         rpc_thread = threading.Thread(
             target=_rpc_server_loop,
             args=(
-                server_sock, task_id, tool_call_log,
+                ipc_transport, task_id, tool_call_log,
                 tool_call_counter, max_tool_calls, sandbox_tools,
             ),
             daemon=True,
@@ -439,7 +453,20 @@ def execute_code(
                 continue
             if any(k.startswith(p) for p in _SAFE_ENV_PREFIXES):
                 child_env[k] = v
-        child_env["HERMES_RPC_SOCKET"] = sock_path
+        
+        # Set IPC-specific environment variables
+        transport_type = type(ipc_transport).__name__
+        
+        if "WindowsNamedPipe" in transport_type:
+            child_env["HERMES_IPC_TRANSPORT"] = "named_pipe"
+            child_env["HERMES_IPC_ENDPOINT"] = endpoint
+        elif "TCPLocalhost" in transport_type:
+            child_env["HERMES_IPC_TRANSPORT"] = "tcp"
+            child_env["HERMES_IPC_ENDPOINT"] = endpoint
+        else:
+            child_env["HERMES_IPC_TRANSPORT"] = "uds"
+            child_env["HERMES_IPC_ENDPOINT"] = endpoint
+        
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
         # Ensure the hermes-agent root is importable in the sandbox so
         # modules like minisweagent_path are available to child scripts.
@@ -452,15 +479,34 @@ def execute_code(
         if _tz_name:
             child_env["TZ"] = _tz_name
 
-        proc = subprocess.Popen(
-            [sys.executable, "script.py"],
-            cwd=tmpdir,
-            env=child_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            preexec_fn=None if _IS_WINDOWS else os.setsid,
-        )
+        # Create process with platform-specific settings
+        if _IS_WINDOWS:
+            # Windows-specific process creation
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            
+            proc = subprocess.Popen(
+                [sys.executable, "script.py"],
+                cwd=tmpdir,
+                env=child_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                startupinfo=startupinfo,
+                creation_flags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            # Unix/Linux/macOS process creation
+            proc = subprocess.Popen(
+                [sys.executable, "script.py"],
+                cwd=tmpdir,
+                env=child_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                preexec_fn=os.setsid,
+            )
 
         # --- Poll loop: watch for exit, timeout, and interrupt ---
         deadline = time.monotonic() + timeout

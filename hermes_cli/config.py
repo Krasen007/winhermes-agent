@@ -163,6 +163,13 @@ DEFAULT_CONFIG = {
         "summary_provider": "auto",
         "summary_base_url": None,
     },
+    
+    "code_execution": {
+        "enabled": True,
+        "timeout": 300,
+        "max_tool_calls": 50,
+        "ipc_transport": "auto",  # auto | uds | named_pipe | tcp
+    },
     "smart_model_routing": {
         "enabled": False,
         "max_simple_chars": 160,
