@@ -2559,14 +2559,55 @@ def _restore_stashed_changes(
         capture_output=True,
         text=True,
     )
-    if restore.returncode != 0:
-        print("✗ Update pulled new code, but restoring local changes failed.")
+
+    # Check for unmerged (conflicted) files — can happen even when returncode is 0
+    unmerged = subprocess.run(
+        git_cmd + ["diff", "--name-only", "--diff-filter=U"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    has_conflicts = bool(unmerged.stdout.strip())
+
+    if restore.returncode != 0 or has_conflicts:
+        print("✗ Update pulled new code, but restoring local changes hit conflicts.")
         if restore.stdout.strip():
             print(restore.stdout.strip())
         if restore.stderr.strip():
             print(restore.stderr.strip())
-        print("Your changes are still preserved in git stash.")
-        print(f"Resolve manually with: git stash apply {stash_ref}")
+
+        # Show which files conflicted
+        conflicted_files = unmerged.stdout.strip()
+        if conflicted_files:
+            print("\nConflicted files:")
+            for f in conflicted_files.splitlines():
+                print(f"  • {f}")
+
+        print("\nYour stashed changes are preserved — nothing is lost.")
+        print(f"  Stash ref: {stash_ref}")
+
+        # Ask before resetting (if interactive)
+        do_reset = True
+        if prompt_user:
+            print("\nReset working tree to clean state so Hermes can run?")
+            print("  (You can re-apply your changes later with: git stash apply)")
+            print("[Y/n] ", end="", flush=True)
+            response = input().strip().lower()
+            if response not in ("", "y", "yes"):
+                do_reset = False
+
+        if do_reset:
+            subprocess.run(
+                git_cmd + ["reset", "--hard", "HEAD"],
+                cwd=cwd,
+                capture_output=True,
+            )
+            print("Working tree reset to clean state.")
+        else:
+            print("Working tree left as-is (may have conflict markers).")
+            print("Resolve conflicts manually, then run: git stash drop")
+
+        print(f"Restore your changes with: git stash apply {stash_ref}")
         sys.exit(1)
 
     stash_selector = _resolve_stash_selector(git_cmd, cwd, stash_ref)
@@ -2688,7 +2729,7 @@ def cmd_update(args):
 
         print("→ Pulling updates...")
         try:
-            subprocess.run(git_cmd + ["pull", "origin", branch], cwd=PROJECT_ROOT, check=True)
+            subprocess.run(git_cmd + ["pull", "--ff-only", "origin", branch], cwd=PROJECT_ROOT, check=True)
         finally:
             if auto_stash_ref is not None:
                 _restore_stashed_changes(
@@ -3528,6 +3569,46 @@ For more help on a command:
             skills_command(args)
 
     skills_parser.set_defaults(func=cmd_skills)
+
+    # =========================================================================
+    # plugins command
+    # =========================================================================
+    plugins_parser = subparsers.add_parser(
+        "plugins",
+        help="Manage plugins — install, update, remove, list",
+        description="Install plugins from Git repositories, update, remove, or list them.",
+    )
+    plugins_subparsers = plugins_parser.add_subparsers(dest="plugins_action")
+
+    plugins_install = plugins_subparsers.add_parser(
+        "install", help="Install a plugin from a Git URL or owner/repo"
+    )
+    plugins_install.add_argument(
+        "identifier",
+        help="Git URL or owner/repo shorthand (e.g. anpicasso/hermes-plugin-chrome-profiles)",
+    )
+    plugins_install.add_argument(
+        "--force", "-f", action="store_true",
+        help="Remove existing plugin and reinstall",
+    )
+
+    plugins_update = plugins_subparsers.add_parser(
+        "update", help="Pull latest changes for an installed plugin"
+    )
+    plugins_update.add_argument("name", help="Plugin name to update")
+
+    plugins_remove = plugins_subparsers.add_parser(
+        "remove", aliases=["rm", "uninstall"], help="Remove an installed plugin"
+    )
+    plugins_remove.add_argument("name", help="Plugin directory name to remove")
+
+    plugins_subparsers.add_parser("list", aliases=["ls"], help="List installed plugins")
+
+    def cmd_plugins(args):
+        from hermes_cli.plugins_cmd import plugins_command
+        plugins_command(args)
+
+    plugins_parser.set_defaults(func=cmd_plugins)
 
     # =========================================================================
     # honcho command

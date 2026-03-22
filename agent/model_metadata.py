@@ -260,9 +260,11 @@ def detect_local_server_type(base_url: str) -> Optional[str]:
                         pass
             except Exception:
                 pass
-            # llama.cpp exposes /props
+            # llama.cpp exposes /v1/props (older builds used /props without the /v1 prefix)
             try:
-                r = client.get(f"{server_url}/props")
+                r = client.get(f"{server_url}/v1/props")
+                if r.status_code != 200:
+                    r = client.get(f"{server_url}/props")  # fallback for older builds
                 if r.status_code == 200 and "default_generation_settings" in r.text:
                     return "llamacpp"
             except Exception:
@@ -455,8 +457,11 @@ def fetch_endpoint_model_metadata(
             )
             if is_llamacpp:
                 try:
-                    props_url = candidate.rstrip("/").replace("/v1", "") + "/props"
-                    props_resp = requests.get(props_url, headers=headers, timeout=5)
+                    # Try /v1/props first (current llama.cpp); fall back to /props for older builds
+                    base = candidate.rstrip("/").replace("/v1", "")
+                    props_resp = requests.get(base + "/v1/props", headers=headers, timeout=5)
+                    if not props_resp.ok:
+                        props_resp = requests.get(base + "/props", headers=headers, timeout=5)
                     if props_resp.ok:
                         props = props_resp.json()
                         gen_settings = props.get("default_generation_settings", {})
@@ -855,10 +860,11 @@ def get_model_context_length(
     # Only check `default_model in model` (is the key a substring of the input).
     # The reverse (`model in default_model`) causes shorter names like
     # "claude-sonnet-4" to incorrectly match "claude-sonnet-4-6" and return 1M.
+    model_lower = model.lower()
     for default_model, length in sorted(
         DEFAULT_CONTEXT_LENGTHS.items(), key=lambda x: len(x[0]), reverse=True
     ):
-        if default_model in model:
+        if default_model in model_lower:
             return length
 
     # 9. Query local server as last resort

@@ -676,7 +676,11 @@ class AIAgent:
 
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
-            effective_key = api_key or resolve_anthropic_token() or ""
+            # Only fall back to ANTHROPIC_TOKEN when the provider is actually Anthropic.
+            # Other anthropic_messages providers (MiniMax, Alibaba, etc.) must use their own API key.
+            # Falling back would send Anthropic credentials to third-party endpoints (Fixes #1739, #minimax-401).
+            _is_native_anthropic = self.provider == "anthropic"
+            effective_key = (api_key or resolve_anthropic_token() or "") if _is_native_anthropic else (api_key or "")
             self.api_key = effective_key
             self._anthropic_api_key = effective_key
             self._anthropic_base_url = base_url
@@ -896,7 +900,7 @@ class AIAgent:
                 pass  # Memory is optional -- don't break agent init
         
         # Honcho AI-native memory (cross-session user modeling)
-        # Reads ~/.honcho/config.json as the single source of truth.
+        # Reads $HERMES_HOME/honcho.json (instance) or ~/.honcho/config.json (global).
         self._honcho = None  # HonchoSessionManager | None
         self._honcho_session_key = honcho_session_key
         self._honcho_config = None  # HonchoClientConfig | None
@@ -969,7 +973,7 @@ class AIAgent:
         self._skill_nudge_interval = 10
         try:
             skills_config = _agent_cfg.get("skills", {})
-            self._skill_nudge_interval = int(skills_config.get("creation_nudge_interval", 15))
+            self._skill_nudge_interval = int(skills_config.get("creation_nudge_interval", 10))
         except Exception:
             pass
 
@@ -1114,7 +1118,13 @@ class AIAgent:
         During tool execution (``_executing_tools`` is True), printing is
         allowed even with stream consumers registered because no tokens
         are being streamed at that point.
+
+        After the main response has been delivered and the remaining tool
+        calls are post-response housekeeping (``_mute_post_response``),
+        all non-forced output is suppressed.
         """
+        if not force and getattr(self, "_mute_post_response", False):
+            return
         if not force and self._has_stream_consumers() and not self._executing_tools:
             return
         self._safe_print(*args, **kwargs)
@@ -1297,6 +1307,129 @@ class AIAgent:
         except Exception as e:
             if self.verbose_logging:
                 logging.warning(f"Failed to cleanup browser for task {task_id}: {e}")
+
+    # ------------------------------------------------------------------
+    # Background memory/skill review
+    # ------------------------------------------------------------------
+
+    _MEMORY_REVIEW_PROMPT = (
+        "Review the conversation above and consider saving to memory if appropriate.\n\n"
+        "Focus on:\n"
+        "1. Has the user revealed things about themselves — their persona, desires, "
+        "preferences, or personal details worth remembering?\n"
+        "2. Has the user expressed expectations about how you should behave, their work "
+        "style, or ways they want you to operate?\n\n"
+        "If something stands out, save it using the memory tool. "
+        "If nothing is worth saving, just say 'Nothing to save.' and stop."
+    )
+
+    _SKILL_REVIEW_PROMPT = (
+        "Review the conversation above and consider saving or updating a skill if appropriate.\n\n"
+        "Focus on: was a non-trivial approach used to complete a task that required trial "
+        "and error, or changing course due to experiential findings along the way, or did "
+        "the user expect or desire a different method or outcome?\n\n"
+        "If a relevant skill already exists, update it with what you learned. "
+        "Otherwise, create a new skill if the approach is reusable.\n"
+        "If nothing is worth saving, just say 'Nothing to save.' and stop."
+    )
+
+    _COMBINED_REVIEW_PROMPT = (
+        "Review the conversation above and consider two things:\n\n"
+        "**Memory**: Has the user revealed things about themselves — their persona, "
+        "desires, preferences, or personal details? Has the user expressed expectations "
+        "about how you should behave, their work style, or ways they want you to operate? "
+        "If so, save using the memory tool.\n\n"
+        "**Skills**: Was a non-trivial approach used to complete a task that required trial "
+        "and error, or changing course due to experiential findings along the way, or did "
+        "the user expect or desire a different method or outcome? If a relevant skill "
+        "already exists, update it. Otherwise, create a new one if the approach is reusable.\n\n"
+        "Only act if there's something genuinely worth saving. "
+        "If nothing stands out, just say 'Nothing to save.' and stop."
+    )
+
+    def _spawn_background_review(
+        self,
+        messages_snapshot: List[Dict],
+        review_memory: bool = False,
+        review_skills: bool = False,
+    ) -> None:
+        """Spawn a background thread to review the conversation for memory/skill saves.
+
+        Creates a full AIAgent fork with the same model, tools, and context as the
+        main session. The review prompt is appended as the next user turn in the
+        forked conversation. Writes directly to the shared memory/skill stores.
+        Never modifies the main conversation history or produces user-visible output.
+        """
+        import threading
+
+        # Pick the right prompt based on which triggers fired
+        if review_memory and review_skills:
+            prompt = self._COMBINED_REVIEW_PROMPT
+        elif review_memory:
+            prompt = self._MEMORY_REVIEW_PROMPT
+        else:
+            prompt = self._SKILL_REVIEW_PROMPT
+
+        def _run_review():
+            import contextlib, os as _os
+            try:
+                with open(_os.devnull, "w") as _devnull, \
+                     contextlib.redirect_stdout(_devnull):
+                    review_agent = AIAgent(
+                        model=self.model,
+                        max_iterations=8,
+                        quiet_mode=True,
+                        platform=self.platform,
+                        provider=self.provider,
+                    )
+                    review_agent._memory_store = self._memory_store
+                    review_agent._memory_enabled = self._memory_enabled
+                    review_agent._user_profile_enabled = self._user_profile_enabled
+                    review_agent._memory_nudge_interval = 0
+                    review_agent._skill_nudge_interval = 0
+
+                    review_agent.run_conversation(
+                        user_message=prompt,
+                        conversation_history=messages_snapshot,
+                    )
+
+                # Scan the review agent's messages for successful tool actions
+                # and surface a compact summary to the user.
+                actions = []
+                for msg in getattr(review_agent, "_session_messages", []):
+                    if not isinstance(msg, dict) or msg.get("role") != "tool":
+                        continue
+                    try:
+                        data = json.loads(msg.get("content", "{}"))
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if not data.get("success"):
+                        continue
+                    message = data.get("message", "")
+                    target = data.get("target", "")
+                    if "created" in message.lower():
+                        actions.append(message)
+                    elif "updated" in message.lower():
+                        actions.append(message)
+                    elif "added" in message.lower() or (target and "add" in message.lower()):
+                        label = "Memory" if target == "memory" else "User profile" if target == "user" else target
+                        actions.append(f"{label} updated")
+                    elif "Entry added" in message:
+                        label = "Memory" if target == "memory" else "User profile" if target == "user" else target
+                        actions.append(f"{label} updated")
+                    elif "removed" in message.lower() or "replaced" in message.lower():
+                        label = "Memory" if target == "memory" else "User profile" if target == "user" else target
+                        actions.append(f"{label} updated")
+
+                if actions:
+                    summary = " · ".join(dict.fromkeys(actions))
+                    self._safe_print(f"  💾 {summary}")
+
+            except Exception as e:
+                logger.debug("Background memory/skill review failed: %s", e)
+
+        t = threading.Thread(target=_run_review, daemon=True, name="bg-review")
+        t.start()
 
     def _apply_persist_user_message_override(self, messages: List[Dict]) -> None:
         """Rewrite the current-turn user message before persistence/return.
@@ -1484,6 +1617,7 @@ class AIAgent:
                     
                     # Add tool calls wrapped in XML tags
                     for tool_call in msg["tool_calls"]:
+                        if not tool_call or not isinstance(tool_call, dict): continue
                         # Parse arguments - should always succeed since we validate during conversation
                         # but keep try-except as safety net
                         try:
@@ -2194,6 +2328,18 @@ class AIAgent:
         if self.provider:
             timestamp_line += f"\nProvider: {self.provider}"
         prompt_parts.append(timestamp_line)
+
+        # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
+        # of the requested model. Inject explicit model identity into the system prompt
+        # so the agent can correctly report which model it is (workaround for API bug).
+        if self.provider == "alibaba":
+            _model_short = self.model.split("/")[-1] if "/" in self.model else self.model
+            prompt_parts.append(
+                f"You are powered by the model named {_model_short}. "
+                f"The exact model ID is {self.model}. "
+                f"When asked what model you are, always answer based on this information, "
+                f"not on any model name returned by the API."
+            )
 
         platform_key = (self.platform or "").lower().strip()
         if platform_key in PLATFORM_HINTS:
@@ -3173,6 +3319,10 @@ class AIAgent:
     def _try_refresh_anthropic_client_credentials(self) -> bool:
         if self.api_mode != "anthropic_messages" or not hasattr(self, "_anthropic_api_key"):
             return False
+        # Only refresh credentials for the native Anthropic provider.
+        # Other anthropic_messages providers (MiniMax, Alibaba, etc.) use their own keys.
+        if self.provider != "anthropic":
+            return False
 
         try:
             from agent.anthropic_adapter import resolve_anthropic_token, build_anthropic_client
@@ -3597,7 +3747,7 @@ class AIAgent:
             if fb_api_mode == "anthropic_messages":
                 # Build native Anthropic client instead of using OpenAI client
                 from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
-                effective_key = fb_client.api_key or resolve_anthropic_token() or ""
+                effective_key = (fb_client.api_key or resolve_anthropic_token() or "") if fb_provider == "anthropic" else (fb_client.api_key or "")
                 self._anthropic_api_key = effective_key
                 self._anthropic_base_url = getattr(fb_client, "base_url", None)
                 self._anthropic_client = build_anthropic_client(effective_key, self._anthropic_base_url)
@@ -3776,6 +3926,13 @@ class AIAgent:
             )
         return transformed
 
+    def _anthropic_preserve_dots(self) -> bool:
+        """True when using Alibaba/DashScope anthropic-compatible endpoint (model names keep dots, e.g. qwen3.5-plus)."""
+        if (getattr(self, "provider", "") or "").lower() == "alibaba":
+            return True
+        base = (getattr(self, "base_url", "") or "").lower()
+        return "dashscope" in base or "aliyuncs" in base
+
     def _build_api_kwargs(self, api_messages: list) -> dict:
         """Build the keyword arguments dict for the active API mode."""
         if self.api_mode == "anthropic_messages":
@@ -3788,6 +3945,7 @@ class AIAgent:
                 max_tokens=self.max_tokens,
                 reasoning_config=self.reasoning_config,
                 is_oauth=getattr(self, "_is_anthropic_oauth", False),
+                preserve_dots=self._anthropic_preserve_dots(),
             )
 
         if self.api_mode == "codex_responses":
@@ -4253,6 +4411,7 @@ class AIAgent:
                         model=self.model, messages=api_messages,
                         tools=[memory_tool_def], max_tokens=5120,
                         reasoning_config=None,
+                        preserve_dots=self._anthropic_preserve_dots(),
                     )
                     response = self._anthropic_messages_create(ant_kwargs)
                 except KeyboardInterrupt:
@@ -4331,25 +4490,6 @@ class AIAgent:
         todo_snapshot = self._todo_store.format_for_injection()
         if todo_snapshot:
             compressed.append({"role": "user", "content": todo_snapshot})
-
-        # Preserve file-read history so the model doesn't re-read files
-        # it already examined before compression.
-        try:
-            from tools.file_tools import get_read_files_summary
-            read_files = get_read_files_summary(task_id)
-            if read_files:
-                file_list = "\n".join(
-                    f"  - {f['path']} ({', '.join(f['regions'])})"
-                    for f in read_files
-                )
-                compressed.append({"role": "user", "content": (
-                    "[Files already read in this session — do NOT re-read these]\n"
-                    f"{file_list}\n"
-                    "Use the information from the context summary above. "
-                    "Proceed with writing, editing, or responding."
-                )})
-        except Exception:
-            pass  # Don't break compression if file tracking fails
 
         self._invalidate_system_prompt()
         new_system_prompt = self._build_system_prompt(system_message)
@@ -5085,7 +5225,8 @@ class AIAgent:
                     from agent.anthropic_adapter import build_anthropic_kwargs as _bak, normalize_anthropic_response as _nar
                     _ant_kw = _bak(model=self.model, messages=api_messages, tools=None,
                                    max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
-                                   is_oauth=getattr(self, '_is_anthropic_oauth', False))
+                                   is_oauth=getattr(self, '_is_anthropic_oauth', False),
+                                   preserve_dots=self._anthropic_preserve_dots())
                     summary_response = self._anthropic_messages_create(_ant_kw)
                     _msg, _ = _nar(summary_response, strip_tool_prefix=getattr(self, '_is_anthropic_oauth', False))
                     final_response = (_msg.content or "").strip()
@@ -5116,7 +5257,8 @@ class AIAgent:
                     from agent.anthropic_adapter import build_anthropic_kwargs as _bak2, normalize_anthropic_response as _nar2
                     _ant_kw2 = _bak2(model=self.model, messages=api_messages, tools=None,
                                     is_oauth=getattr(self, '_is_anthropic_oauth', False),
-                                     max_tokens=self.max_tokens, reasoning_config=self.reasoning_config)
+                                    max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
+                                    preserve_dots=self._anthropic_preserve_dots())
                     retry_response = self._anthropic_messages_create(_ant_kw2)
                     _retry_msg, _ = _nar2(retry_response, strip_tool_prefix=getattr(self, '_is_anthropic_oauth', False))
                     final_response = (_retry_msg.content or "").strip()
@@ -5202,6 +5344,7 @@ class AIAgent:
         self._incomplete_scratchpad_retries = 0
         self._codex_incomplete_retries = 0
         self._last_content_with_tools = None
+        self._mute_post_response = False
         # NOTE: _turns_since_memory and _iters_since_skill are NOT reset here.
         # They are initialized in __init__ and must persist across run_conversation
         # calls so that nudge logic accumulates correctly in CLI mode.
@@ -5224,35 +5367,21 @@ class AIAgent:
         # Track user turns for memory flush and periodic nudge logic
         self._user_turn_count += 1
 
-        # Preserve the original user message before nudge injection.
+        # Preserve the original user message (no nudge injection).
         # Honcho should receive the actual user input, not system nudges.
         original_user_message = persist_user_message if persist_user_message is not None else user_message
 
-        # Periodic memory nudge: remind the model to consider saving memories.
-        # Counter resets whenever the memory tool is actually used.
+        # Track memory nudge trigger (turn-based, checked here).
+        # Skill trigger is checked AFTER the agent loop completes, based on
+        # how many tool iterations THIS turn used.
+        _should_review_memory = False
         if (self._memory_nudge_interval > 0
                 and "memory" in self.valid_tool_names
                 and self._memory_store):
             self._turns_since_memory += 1
             if self._turns_since_memory >= self._memory_nudge_interval:
-                user_message += (
-                    "\n\n[System: You've had several exchanges. Consider: "
-                    "has the user shared preferences, corrected you, or revealed "
-                    "something about their workflow worth remembering for future sessions?]"
-                )
+                _should_review_memory = True
                 self._turns_since_memory = 0
-
-        # Skill creation nudge: fires on the first user message after a long tool loop.
-        # The counter increments per API iteration in the tool loop and is checked here.
-        if (self._skill_nudge_interval > 0
-                and self._iters_since_skill >= self._skill_nudge_interval
-                and "skill_manage" in self.valid_tool_names):
-            user_message += (
-                "\n\n[System: The previous task involved many tool calls. "
-                "Save the approach as a skill if it's reusable, or update "
-                "any existing skill you used if it was wrong or incomplete.]"
-            )
-            self._iters_since_skill = 0
 
         # Honcho prefetch consumption:
         # - First turn: bake into cached system prompt (stable for the session).
@@ -5485,7 +5614,7 @@ class AIAgent:
             # inject cache_control breakpoints (system + last 3 messages) to reduce
             # input token costs by ~75% on multi-turn conversations.
             if self._use_prompt_caching:
-                api_messages = apply_anthropic_cache_control(api_messages, cache_ttl=self._cache_ttl)
+                api_messages = apply_anthropic_cache_control(api_messages, cache_ttl=self._cache_ttl, native_anthropic=(self.api_mode == 'anthropic_messages'))
 
             # Safety net: strip orphaned tool results / add stubs for missing
             # results before sending to the API.  Runs unconditionally — not
@@ -5969,10 +6098,14 @@ class AIAgent:
                         api_error,
                     )
 
+                    _provider = getattr(self, "provider", "unknown")
+                    _base = getattr(self, "base_url", "unknown")
+                    _model = getattr(self, "model", "unknown")
                     self._vprint(f"{self.log_prefix}⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}", force=True)
-                    self._vprint(f"{self.log_prefix}   ⏱️  Time elapsed before failure: {elapsed_time:.2f}s")
+                    self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
+                    self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
                     self._vprint(f"{self.log_prefix}   📝 Error: {str(api_error)[:200]}", force=True)
-                    self._vprint(f"{self.log_prefix}   📊 Request context: {len(api_messages)} messages, ~{approx_tokens:,} tokens, {len(self.tools) if self.tools else 0} tools")
+                    self._vprint(f"{self.log_prefix}   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
                     
                     # Check for interrupt before deciding to retry
                     if self._interrupt_requested:
@@ -6182,8 +6315,18 @@ class AIAgent:
                         self._dump_api_request_debug(
                             api_kwargs, reason="non_retryable_client_error", error=api_error,
                         )
-                        self._vprint(f"{self.log_prefix}❌ Non-retryable client error detected. Aborting immediately.", force=True)
-                        self._vprint(f"{self.log_prefix}   💡 This type of error won't be fixed by retrying.", force=True)
+                        self._vprint(f"{self.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.", force=True)
+                        self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
+                        self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
+                        # Actionable guidance for common auth errors
+                        if status_code in (401, 403) or "unauthorized" in error_msg or "forbidden" in error_msg or "permission" in error_msg:
+                            self._vprint(f"{self.log_prefix}   💡 Your API key was rejected by the provider. Check:", force=True)
+                            self._vprint(f"{self.log_prefix}      • Is the key valid? Run: hermes setup", force=True)
+                            self._vprint(f"{self.log_prefix}      • Does your account have access to {_model}?", force=True)
+                            if "openrouter" in str(_base).lower():
+                                self._vprint(f"{self.log_prefix}      • Check credits: https://openrouter.ai/settings/credits", force=True)
+                        else:
+                            self._vprint(f"{self.log_prefix}   💡 This type of error won't be fixed by retrying.", force=True)
                         logging.error(f"{self.log_prefix}Non-retryable client error: {api_error}")
                         # Skip session persistence when the error is likely
                         # context-overflow related (status 400 + large session).
@@ -6539,8 +6682,13 @@ class AIAgent:
                     turn_content = assistant_message.content or ""
                     if turn_content and self._has_content_after_think_block(turn_content):
                         self._last_content_with_tools = turn_content
-                        # Show intermediate commentary so the user can follow along
-                        if self.quiet_mode:
+                        # The response was already streamed to the user in the
+                        # response box.  The remaining tool calls (memory, skill,
+                        # todo, etc.) are post-response housekeeping — mute all
+                        # subsequent CLI output so they run invisibly.
+                        if self._has_stream_consumers():
+                            self._mute_post_response = True
+                        elif self.quiet_mode:
                             clean = self._strip_think_blocks(turn_content).strip()
                             if clean:
                                 self._vprint(f"  ┊ 💬 {clean}")
@@ -6561,6 +6709,9 @@ class AIAgent:
 
                     _msg_count_before_tools = len(messages)
                     self._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+
+                    # Signal iteration boundary to stream consumers to prevent text concatenation
+                    self._fire_stream_delta("\n\n")
 
                     # Refund the iteration if the ONLY tool(s) called were
                     # execute_code (programmatic tool calling).  These are
@@ -6633,6 +6784,7 @@ class AIAgent:
                                 if msg.get("role") == "assistant" and msg.get("tool_calls"):
                                     tool_names = []
                                     for tc in msg["tool_calls"]:
+                                        if not tc or not isinstance(tc, dict): continue
                                         fn = tc.get("function", {})
                                         tool_names.append(fn.get("name", "unknown"))
                                     msg["content"] = f"Calling the {', '.join(tool_names)} tool{'s' if len(tool_names) > 1 else ''}..."
@@ -6675,6 +6827,7 @@ class AIAgent:
                                     if msg.get("role") == "assistant" and msg.get("tool_calls"):
                                         tool_names = []
                                         for tc in msg["tool_calls"]:
+                                            if not tc or not isinstance(tc, dict): continue
                                             fn = tc.get("function", {})
                                             tool_names.append(fn.get("name", "unknown"))
                                         msg["content"] = f"Calling the {', '.join(tool_names)} tool{'s' if len(tool_names) > 1 else ''}..."
@@ -6794,6 +6947,7 @@ class AIAgent:
                             if isinstance(m, dict) and m.get("role") == "tool"
                         }
                         for tc in msg["tool_calls"]:
+                            if not tc or not isinstance(tc, dict): continue
                             if tc["id"] not in answered_ids:
                                 err_msg = {
                                     "role": "tool",
@@ -6804,20 +6958,18 @@ class AIAgent:
                         pending_handled = True
                     break
                 
-                if not pending_handled:
-                    # Error happened before tool processing (e.g. response parsing).
-                    # Choose role to avoid consecutive same-role messages.
-                    last_role = messages[-1].get("role") if messages else None
-                    err_role = "assistant" if last_role == "user" else "user"
-                    sys_err_msg = {
-                        "role": err_role,
-                        "content": f"[System error during processing: {error_msg}]",
-                    }
-                    messages.append(sys_err_msg)
-                
+                # Non-tool errors don't need a synthetic message injected.
+                # The error is already printed to the user (line above), and
+                # the retry loop continues.  Injecting a fake user/assistant
+                # message pollutes history, burns tokens, and risks violating
+                # role-alternation invariants.
+
                 # If we're near the limit, break to avoid infinite loops
                 if api_call_count >= self.max_iterations - 1:
                     final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
+                    # Append as assistant so the history stays valid for
+                    # session resume (avoids consecutive user messages).
+                    messages.append({"role": "assistant", "content": final_response})
                     break
         
         if final_response is None and (
@@ -6889,6 +7041,26 @@ class AIAgent:
 
         # Clear stream callback so it doesn't leak into future calls
         self._stream_callback = None
+
+        # Check skill trigger NOW — based on how many tool iterations THIS turn used.
+        _should_review_skills = False
+        if (self._skill_nudge_interval > 0
+                and self._iters_since_skill >= self._skill_nudge_interval
+                and "skill_manage" in self.valid_tool_names):
+            _should_review_skills = True
+            self._iters_since_skill = 0
+
+        # Background memory/skill review — runs AFTER the response is delivered
+        # so it never competes with the user's task for model attention.
+        if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+            try:
+                self._spawn_background_review(
+                    messages_snapshot=list(messages),
+                    review_memory=_should_review_memory,
+                    review_skills=_should_review_skills,
+                )
+            except Exception:
+                pass  # Background review is best-effort
 
         return result
 

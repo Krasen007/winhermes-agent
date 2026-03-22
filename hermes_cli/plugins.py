@@ -5,7 +5,8 @@ Hermes Plugin System
 Discovers, loads, and manages plugins from three sources:
 
 1. **User plugins**   – ``~/.hermes/plugins/<name>/``
-2. **Project plugins** – ``./.hermes/plugins/<name>/``
+2. **Project plugins** – ``./.hermes/plugins/<name>/`` (opt-in via
+   ``HERMES_ENABLE_PROJECT_PLUGINS``)
 3. **Pip plugins**     – packages that expose the ``hermes_agent.plugins``
    entry-point group.
 
@@ -22,6 +23,12 @@ Tool registration
 -----------------
 ``PluginContext.register_tool()`` delegates to ``tools.registry.register()``
 so plugin-defined tools appear alongside the built-in tools.
+
+Slash command registration
+--------------------------
+``PluginContext.register_command()`` adds a slash command to the central
+``COMMAND_REGISTRY`` so it appears in /help, autocomplete, and gateway
+dispatch.  Handlers receive the argument string and return a response.
 """
 
 from __future__ import annotations
@@ -62,6 +69,11 @@ ENTRY_POINTS_GROUP = "hermes_agent.plugins"
 _NS_PARENT = "hermes_plugins"
 
 
+def _env_enabled(name: str) -> bool:
+    """Return True when an env var is set to a truthy opt-in value."""
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -89,6 +101,7 @@ class LoadedPlugin:
     module: Optional[types.ModuleType] = None
     tools_registered: List[str] = field(default_factory=list)
     hooks_registered: List[str] = field(default_factory=list)
+    commands_registered: List[str] = field(default_factory=list)
     enabled: bool = False
     error: Optional[str] = None
 
@@ -135,6 +148,45 @@ class PluginContext:
         self._manager._plugin_tool_names.add(name)
         logger.debug("Plugin %s registered tool: %s", self.manifest.name, name)
 
+    # -- command registration ------------------------------------------------
+
+    def register_command(
+        self,
+        name: str,
+        handler: Callable,
+        description: str = "",
+        aliases: tuple[str, ...] = (),
+        args_hint: str = "",
+        cli_only: bool = False,
+        gateway_only: bool = False,
+    ) -> None:
+        """Register a slash command in the central command registry.
+
+        The *handler* is called with a single ``args`` string (everything
+        after the command name) and should return a string to display to the
+        user, or ``None`` for no output.  Async handlers are also supported
+        (they will be awaited in the gateway).
+
+        The command automatically appears in ``/help``, tab-autocomplete,
+        Telegram bot menu, Slack subcommand mapping, and gateway dispatch.
+        """
+        from hermes_cli.commands import CommandDef, register_plugin_command
+
+        cmd_def = CommandDef(
+            name=name,
+            description=description or f"Plugin command: {name}",
+            category="Plugins",
+            aliases=aliases,
+            args_hint=args_hint,
+            cli_only=cli_only,
+            gateway_only=gateway_only,
+        )
+        register_plugin_command(cmd_def)
+        self._manager._plugin_commands[name] = handler
+        for alias in aliases:
+            self._manager._plugin_commands[alias] = handler
+        logger.debug("Plugin %s registered command: /%s", self.manifest.name, name)
+
     # -- hook registration --------------------------------------------------
 
     def register_hook(self, hook_name: str, callback: Callable) -> None:
@@ -166,6 +218,7 @@ class PluginManager:
         self._plugins: Dict[str, LoadedPlugin] = {}
         self._hooks: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
+        self._plugin_commands: Dict[str, Callable] = {}
         self._discovered: bool = False
 
     # -----------------------------------------------------------------------
@@ -186,8 +239,9 @@ class PluginManager:
         manifests.extend(self._scan_directory(user_dir, source="user"))
 
         # 2. Project plugins (./.hermes/plugins/)
-        project_dir = Path.cwd() / ".hermes" / "plugins"
-        manifests.extend(self._scan_directory(project_dir, source="project"))
+        if _env_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
+            project_dir = Path.cwd() / ".hermes" / "plugins"
+            manifests.extend(self._scan_directory(project_dir, source="project"))
 
         # 3. Pip / entry-point plugins
         manifests.extend(self._scan_entry_points())
@@ -318,6 +372,14 @@ class PluginManager:
                         for h in p.hooks_registered
                     }
                 )
+                loaded.commands_registered = [
+                    c for c in self._plugin_commands
+                    if c not in {
+                        n
+                        for name, p in self._plugins.items()
+                        for n in p.commands_registered
+                    }
+                ]
                 loaded.enabled = True
 
         except Exception as exc:
@@ -413,6 +475,7 @@ class PluginManager:
                     "enabled": loaded.enabled,
                     "tools": len(loaded.tools_registered),
                     "hooks": len(loaded.hooks_registered),
+                    "commands": len(loaded.commands_registered),
                     "error": loaded.error,
                 }
             )
@@ -447,3 +510,8 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> None:
 def get_plugin_tool_names() -> Set[str]:
     """Return the set of tool names registered by plugins."""
     return get_plugin_manager()._plugin_tool_names
+
+
+def get_plugin_command_handler(name: str) -> Optional[Callable]:
+    """Return the handler for a plugin-registered slash command, or None."""
+    return get_plugin_manager()._plugin_commands.get(name)

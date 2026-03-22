@@ -347,16 +347,44 @@ def _rpc_server_loop(
             # Return result (may be JSON string)
             if isinstance(result, str):
                 try:
-                    return json.loads(result)
-                except (json.JSONDecodeError, TypeError):
-                    return result
-            return result
-        
-        # Start listening with the callback
-        ipc_transport.listen(message_callback)
-        
-    except Exception as e:
-        logger.debug("RPC server error: %s", e, exc_info=True)
+                    _real_stdout, _real_stderr = sys.stdout, sys.stderr
+                    devnull = open(os.devnull, "w")
+                    try:
+                        sys.stdout = devnull
+                        sys.stderr = devnull
+                        result = handle_function_call(
+                            tool_name, tool_args, task_id=task_id
+                        )
+                    finally:
+                        sys.stdout, sys.stderr = _real_stdout, _real_stderr
+                        devnull.close()
+                except Exception as exc:
+                    logger.error("Tool call failed in sandbox: %s", exc, exc_info=True)
+                    result = json.dumps({"error": str(exc)})
+
+                tool_call_counter[0] += 1
+                call_duration = time.monotonic() - call_start
+
+                # Log for observability
+                args_preview = str(tool_args)[:80]
+                tool_call_log.append({
+                    "tool": tool_name,
+                    "args_preview": args_preview,
+                    "duration": round(call_duration, 2),
+                })
+
+                conn.sendall((result + "\n").encode())
+
+    except socket.timeout:
+        logger.debug("RPC listener socket timeout")
+    except OSError as e:
+        logger.debug("RPC listener socket error: %s", e, exc_info=True)
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except OSError as e:
+                logger.debug("RPC conn close error: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +648,7 @@ def execute_code(
 
         # Wait for RPC thread to finish
         server_sock.close()  # break accept() so thread exits promptly
+        server_sock = None  # prevent double close in finally
         rpc_thread.join(timeout=3)
 
         # Build response
