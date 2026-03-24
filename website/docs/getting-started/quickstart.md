@@ -137,7 +137,7 @@ hermes gateway setup    # Interactive platform configuration
 Want microphone input in the CLI or spoken replies in messaging?
 
 ```bash
-pip install hermes-agent[voice]
+pip install "hermes-agent[voice]"
 
 # Optional but recommended for free local speech-to-text
 pip install faster-whisper

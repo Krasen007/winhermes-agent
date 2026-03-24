@@ -1204,6 +1204,53 @@ _client_cache: Dict[tuple, tuple] = {}
 _client_cache_lock = threading.Lock()
 
 
+def _force_close_async_httpx(client: Any) -> None:
+    """Mark the httpx AsyncClient inside an AsyncOpenAI client as closed.
+
+    This prevents ``AsyncHttpxClientWrapper.__del__`` from scheduling
+    ``aclose()`` on a (potentially closed) event loop, which causes
+    ``RuntimeError: Event loop is closed`` → prompt_toolkit's
+    "Press ENTER to continue..." handler.
+
+    We intentionally do NOT run the full async close path — the
+    connections will be dropped by the OS when the process exits.
+    """
+    try:
+        from httpx._client import ClientState
+        inner = getattr(client, "_client", None)
+        if inner is not None and not getattr(inner, "is_closed", True):
+            inner._state = ClientState.CLOSED
+    except Exception:
+        pass
+
+
+def shutdown_cached_clients() -> None:
+    """Close all cached clients (sync and async) to prevent event-loop errors.
+
+    Call this during CLI shutdown, *before* the event loop is closed, to
+    avoid ``AsyncHttpxClientWrapper.__del__`` raising on a dead loop.
+    """
+    import inspect
+
+    with _client_cache_lock:
+        for key, entry in list(_client_cache.items()):
+            client = entry[0]
+            if client is None:
+                continue
+            # Mark any async httpx transport as closed first (prevents __del__
+            # from scheduling aclose() on a dead event loop).
+            _force_close_async_httpx(client)
+            # Sync clients: close the httpx connection pool cleanly.
+            # Async clients: skip — we already neutered __del__ above.
+            try:
+                close_fn = getattr(client, "close", None)
+                if close_fn and not inspect.iscoroutinefunction(close_fn):
+                    close_fn()
+            except Exception:
+                pass
+        _client_cache.clear()
+
+
 def _get_cached_client(
     provider: str,
     model: str = None,
@@ -1222,6 +1269,7 @@ def _get_cached_client(
                 # "Event loop is closed" when httpx tries to clean up its
                 # transport.  Discard the stale client and create a fresh one.
                 if cached_loop is not None and cached_loop.is_closed():
+                    _force_close_async_httpx(cached_client)
                     del _client_cache[cache_key]
                 else:
                     return cached_client, model or cached_default
@@ -1451,8 +1499,18 @@ def call_llm(
             api_key=resolved_api_key,
         )
         if client is None:
-            # Fallback: try openrouter
-            if resolved_provider != "openrouter" and not resolved_base_url:
+            # When the user explicitly chose a non-OpenRouter provider but no
+            # credentials were found, fail fast instead of silently routing
+            # through OpenRouter (which causes confusing 404s).
+            _explicit = (resolved_provider or "").strip().lower()
+            if _explicit and _explicit not in ("auto", "openrouter", "custom"):
+                raise RuntimeError(
+                    f"Provider '{_explicit}' is set in config.yaml but no API key "
+                    f"was found. Set the {_explicit.upper()}_API_KEY environment "
+                    f"variable, or switch to a different provider with `hermes model`."
+                )
+            # For auto/custom, fall back to OpenRouter
+            if not resolved_base_url:
                 logger.warning("Provider %s unavailable, falling back to openrouter",
                                resolved_provider)
                 client, final_model = _get_cached_client(
@@ -1534,7 +1592,14 @@ async def async_call_llm(
             api_key=resolved_api_key,
         )
         if client is None:
-            if resolved_provider != "openrouter" and not resolved_base_url:
+            _explicit = (resolved_provider or "").strip().lower()
+            if _explicit and _explicit not in ("auto", "openrouter", "custom"):
+                raise RuntimeError(
+                    f"Provider '{_explicit}' is set in config.yaml but no API key "
+                    f"was found. Set the {_explicit.upper()}_API_KEY environment "
+                    f"variable, or switch to a different provider with `hermes model`."
+                )
+            if not resolved_base_url:
                 logger.warning("Provider %s unavailable, falling back to openrouter",
                                resolved_provider)
                 client, final_model = _get_cached_client(
