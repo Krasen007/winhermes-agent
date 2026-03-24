@@ -3137,6 +3137,8 @@ class GatewayRunner:
                 runtime = resolve_runtime_provider(requested=current_provider)
                 api_key = runtime.get("api_key", "")
                 base_url = runtime.get("base_url", "")
+            except Exception:
+                pass
         # Handle bare "/model custom" — switch to custom provider
         # and auto-detect the model from the endpoint.
         if args.strip().lower() == "custom":
