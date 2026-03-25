@@ -209,15 +209,15 @@ else:
             endpoint = os.environ.get("HERMES_IPC_ENDPOINT")
             
             if endpoint.startswith("tcp://"):
-                from ipc_base import TCPLocalhost
+                from tools.ipc_base import TCPLocalhost
                 host, port = endpoint.replace("tcp://", "").split(":")
                 _transport = TCPLocalhost(int(port))
             elif endpoint.startswith("\\\\.\\pipe\\"):
-                from ipc_base import WindowsNamedPipe
+                from tools.ipc_base import WindowsNamedPipe
                 pipe_name = endpoint.replace("\\\\.\\pipe\\", "")
                 _transport = WindowsNamedPipe(pipe_name)
             else:
-                from ipc_base import UnixDomainSocket
+                from tools.ipc_base import UnixDomainSocket
                 _transport = UnixDomainSocket(endpoint)
         
         return _transport
