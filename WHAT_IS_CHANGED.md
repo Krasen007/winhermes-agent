@@ -4,11 +4,6 @@ This document summarizes the key differences between the WinHermes fork (`F:\AI\
 
 ## Overview
 
-- **Total changed files**: 242
-- **Core modified files**: 35 (excluding mini-swe-agent submodule, tests, and docs)
-- **Commits ahead**: 20
-- **Primary focus**: Native Windows support and enhanced functionality
-
 ## 🪟 Major Windows-Specific Features
 
 ### 1. Native Windows Support
@@ -41,8 +36,7 @@ Modified `tools/environments/local.py`:
 
 ### Documentation
 - `ORIGINAL_README.md` - Backup of original README
-- `MERGE.md` - This document
-- `plan.md` - Development planning document
+- `WHAT_IS_CHANGED.md` - This document
 
 ### Setup & Scripts
 - `setup-hermes.bat` - Windows-native setup script (277 lines)
@@ -84,12 +78,6 @@ Modified `tools/environments/local.py`:
 
 ## 🚀 Additional Features
 
-### Mini-SWE Agent Integration
-Complete mini-swe-agent submodule added with:
-- Extensive test suite (~3000+ tests)
-- Multiple environment backends (Docker, Singularity, Modal)
-- Model integrations (Anthropic, OpenRouter, Portkey, etc.)
-
 ### Enhanced Browser Support
 - Fixed WinError 193 installation issues
 - Full browser automation on Windows
@@ -102,22 +90,6 @@ Complete mini-swe-agent submodule added with:
 - Better model format handling
 - Generic endpoint detection for non-OpenRouter URLs
 
-## 📊 Statistics
-
-### File Changes Breakdown
-- **Core modified files**: 35
-- **Mini-swe-agent files**: 190
-- **Test files**: 17
-- **Website documentation**: 0 (excluded from this analysis)
-
-### Commit History
-Key commits include:
-- `97bb0e6a` - update readme
-- `aeb55046` - merge to 0.4.0
-- `4f7931eb` - Fix merge conflicts for Windows port
-- `c85d6b1c` - feat: Add Windows code execution support
-- `89a34c93` - basic working version for windows including ollama support
-
 ## 🔍 Key Differences Summary
 
 1. **Windows Native Support**: Complete transformation from Linux/WSL-focused to first-class Windows application
@@ -127,10 +99,6 @@ Key commits include:
 5. **Gateway Performance**: Agent caching and enhanced platform support
 6. **Browser Tools**: Fixed Windows compatibility issues
 7. **Ollama Integration**: Improved local model support
-
-## � Sync Status
-
-Your fork is actively maintained but behind upstream by several commits. Consider merging upstream changes to get the latest bug fixes and features while preserving Windows functionality.
 
 ## 📝 Notes
 

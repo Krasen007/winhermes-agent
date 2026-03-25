@@ -1,11 +1,24 @@
-# Hermes Agent - Development Guide
+# Hermes Agent - Windows Port Development Guide
 
-Instructions for AI coding assistants and developers working on the hermes-agent codebase.
+Instructions for AI coding assistants and developers working on the **WinHermes** codebase - a Windows-native port of the original Hermes Agent.
+
+## About WinHermes
+
+WinHermes is a Windows-native fork of the original Hermes Agent (`https://github.com/NousResearch/hermes-agent`), located at `F:\AI\winhermes-agent`. This version provides complete Windows compatibility without requiring WSL2, including native Windows code execution, process management, and setup automation.
+
+### Key Windows Features
+- **Native Windows support** - Full Windows compatibility without WSL2
+- **Windows batch script setup** - `setup-hermes.bat` for automated installation
+- **Cross-platform IPC** - Unix domain sockets on Linux/macOS, named pipes on Windows, TCP fallback
+- **Windows code execution** - Full sandboxed Python execution with named pipes
+- **Windows process management** - Proper Windows PATH and process handling
+- **Browser tools support** - Fixed WinError 193 issues, full browser automation
 
 ## Development Environment
 
-```bash
-source venv/bin/activate  # ALWAYS activate before running Python
+```batch
+rem ALWAYS activate before running Python
+venv\Scripts\activate
 ```
 
 ## Project Structure
