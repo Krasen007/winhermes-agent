@@ -167,7 +167,8 @@ def _find_bash() -> str:
 
     The fence wrapper uses bash syntax (semicolons, $?, printf), so we
     must use bash — not the user's $SHELL which could be fish/zsh/etc.
-    On Windows: uses Git Bash (bundled with Git for Windows).
+    On Windows: uses Git Bash (bundled with Git for Windows) or native cmd.exe
+    if HERMES_USE_NATIVE_WINDOWS_SHELL is set.
     """
     if not _IS_WINDOWS:
         return (
@@ -178,7 +179,14 @@ def _find_bash() -> str:
             or "/bin/sh"
         )
 
-    # Windows: look for Git Bash (installed with Git for Windows).
+    # Windows: check if user wants native Windows shell
+    if os.environ.get("HERMES_USE_NATIVE_WINDOWS_SHELL", "").lower() in ("1", "true", "yes"):
+        # Use native Windows cmd.exe
+        cmd_path = os.environ.get("ComSpec") or r"C:\Windows\System32\cmd.exe"
+        if os.path.isfile(cmd_path):
+            return cmd_path
+
+    # Default: look for Git Bash (installed with Git for Windows).
     # Allow override via env var (same pattern as Claude Code).
     custom = os.environ.get("HERMES_GIT_BASH_PATH")
     if custom and os.path.isfile(custom):
@@ -344,8 +352,19 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
     def _spawn_shell_process(self) -> subprocess.Popen:
         user_shell = _find_bash()
         run_env = _make_run_env(self.env)
+        
+        # Check if we're using native Windows shell
+        is_cmd = user_shell.endswith("cmd.exe")
+        
+        if is_cmd:
+            # cmd.exe doesn't support -l flag
+            shell_args = ["/k"]
+        else:
+            # Bash login shell
+            shell_args = ["-l"]
+            
         return subprocess.Popen(
-            [user_shell, "-l"],
+            [user_shell] + shell_args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -401,17 +420,33 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
             effective_stdin = stdin_data
 
         user_shell = _find_bash()
-        fenced_cmd = (
-            f"printf '{_OUTPUT_FENCE}';"
-            f" {exec_command};"
-            f" __hermes_rc=$?;"
-            f" printf '{_OUTPUT_FENCE}';"
-            f" exit $__hermes_rc"
-        )
+        
+        # Check if we're using native Windows shell
+        is_cmd = user_shell.endswith("cmd.exe")
+        
+        if is_cmd:
+            # Windows cmd.exe syntax
+            fenced_cmd = (
+                f"echo {_OUTPUT_FENCE}"
+                f" & {exec_command}"
+                f" & echo {_OUTPUT_FENCE}"
+                f" & exit /b %ERRORLEVEL%"
+            )
+            shell_args = ["/c", fenced_cmd]
+        else:
+            # Bash syntax
+            fenced_cmd = (
+                f"printf '{_OUTPUT_FENCE}';"
+                f" {exec_command};"
+                f" __hermes_rc=$?;"
+                f" printf '{_OUTPUT_FENCE}';"
+                f" exit $__hermes_rc"
+            )
+            shell_args = ["-lic", fenced_cmd]
         run_env = _make_run_env(self.env)
 
         proc = subprocess.Popen(
-            [user_shell, "-lic", fenced_cmd],
+            [user_shell] + shell_args,
             text=True,
             cwd=work_dir,
             env=run_env,
@@ -419,8 +454,7 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
             errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE if effective_stdin is not None else subprocess.DEVNULL,
-            preexec_fn=None if _IS_WINDOWS else os.setsid,
+            stdin=subprocess.PIPE if effective_stdin is not None else None,
         )
 
         if effective_stdin is not None:
