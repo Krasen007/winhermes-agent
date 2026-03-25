@@ -285,6 +285,8 @@ def _rpc_server_loop(
 
     try:
         # Start listening for connections
+        conn = ipc_transport.accept()
+        
         def message_callback(request):
             """Handle incoming RPC messages."""
             call_start = time.monotonic()
@@ -345,36 +347,30 @@ def _rpc_server_loop(
             })
             
             # Return result (may be JSON string)
-            if isinstance(result, str):
+            return result
+
+        # Process messages until client disconnects or limit reached
+        while tool_call_counter[0] < max_tool_calls:
+            try:
+                request = conn.recv(4096).decode().strip()
+                if not request:
+                    break  # Client disconnected
+                
+                # Parse request and get response
                 try:
-                    _real_stdout, _real_stderr = sys.stdout, sys.stderr
-                    devnull = open(os.devnull, "w")
-                    try:
-                        sys.stdout = devnull
-                        sys.stderr = devnull
-                        result = handle_function_call(
-                            tool_name, tool_args, task_id=task_id
-                        )
-                    finally:
-                        sys.stdout, sys.stderr = _real_stdout, _real_stderr
-                        devnull.close()
-                except Exception as exc:
-                    logger.error("Tool call failed in sandbox: %s", exc, exc_info=True)
-                    result = json.dumps({"error": str(exc)})
-
-                tool_call_counter[0] += 1
-                call_duration = time.monotonic() - call_start
-
-                # Log for observability
-                args_preview = str(tool_args)[:80]
-                tool_call_log.append({
-                    "tool": tool_name,
-                    "args_preview": args_preview,
-                    "duration": round(call_duration, 2),
-                })
-
+                    request_data = json.loads(request)
+                except json.JSONDecodeError:
+                    result = json.dumps({"error": "Invalid JSON request"})
+                else:
+                    result = message_callback(request_data)
+                
                 conn.sendall((result + "\n").encode())
-
+                
+            except socket.timeout:
+                break
+            except OSError:
+                break  # Connection lost
+                
     except socket.timeout:
         logger.debug("RPC listener socket timeout")
     except OSError as e:
