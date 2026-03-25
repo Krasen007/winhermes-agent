@@ -283,94 +283,177 @@ def _rpc_server_loop(
     """
     from model_tools import handle_function_call
 
+    conn = None  # Initialize conn to None
     try:
-        # Start listening for connections
-        conn = ipc_transport.accept()
-        
-        def message_callback(request):
-            """Handle incoming RPC messages."""
-            call_start = time.monotonic()
+        # Check if this is a Windows named pipe or Unix socket
+        if hasattr(ipc_transport, 'listen'):
+            # Windows named pipe - use callback-based API
+            results = []
+            stop_event = threading.Event()
             
-            tool_name = request.get("tool", "")
-            tool_args = request.get("args", {})
-            
-            # Enforce allow-list
-            if tool_name not in allowed_tools:
-                available = ", ".join(sorted(allowed_tools))
-                return {
-                    "error": (
-                        f"Tool '{tool_name}' is not available in execute_code. "
-                        f"Available: {available}"
-                    )
-                }
-            
-            # Enforce tool call limit
-            if tool_call_counter[0] >= max_tool_calls:
-                return {
-                    "error": (
-                        f"Tool call limit reached ({max_tool_calls}). "
-                        "No more tool calls allowed in this execution."
-                    )
-                }
-            
-            # Strip forbidden terminal parameters
-            if tool_name == "terminal" and isinstance(tool_args, dict):
-                for param in _TERMINAL_BLOCKED_PARAMS:
-                    tool_args.pop(param, None)
-            
-            # Dispatch through standard tool handler
-            try:
-                _real_stdout, _real_stderr = sys.stdout, sys.stderr
-                sys.stdout = open(os.devnull, "w")
-                sys.stderr = open(os.devnull, "w")
-                try:
-                    result = handle_function_call(
-                        tool_name, tool_args, task_id=task_id
-                    )
-                finally:
-                    sys.stdout.close()
-                    sys.stderr.close()
-                    sys.stdout, sys.stderr = _real_stdout, _real_stderr
-            except Exception as exc:
-                logger.error("Tool call failed in sandbox: %s", exc, exc_info=True)
-                result = json.dumps({"error": str(exc)})
-            
-            tool_call_counter[0] += 1
-            call_duration = time.monotonic() - call_start
-            
-            # Log for observability
-            args_preview = str(tool_args)[:80]
-            tool_call_log.append({
-                "tool": tool_name,
-                "args_preview": args_preview,
-                "duration": round(call_duration, 2),
-            })
-            
-            # Return result (may be JSON string)
-            return result
-
-        # Process messages until client disconnects or limit reached
-        while tool_call_counter[0] < max_tool_calls:
-            try:
-                request = conn.recv(4096).decode().strip()
-                if not request:
-                    break  # Client disconnected
+            def message_callback(request):
+                """Handle incoming RPC messages."""
+                call_start = time.monotonic()
                 
-                # Parse request and get response
-                try:
-                    request_data = json.loads(request)
-                except json.JSONDecodeError:
-                    result = json.dumps({"error": "Invalid JSON request"})
+                tool_name = request.get("tool", "")
+                tool_args = request.get("args", {})
+                
+                # Enforce allow-list
+                if tool_name not in allowed_tools:
+                    available = ", ".join(sorted(allowed_tools))
+                    result = {
+                        "error": (
+                            f"Tool '{tool_name}' is not available in execute_code. "
+                            f"Available: {available}"
+                        )
+                    }
+                # Enforce tool call limit
+                elif tool_call_counter[0] >= max_tool_calls:
+                    result = {
+                        "error": (
+                            f"Tool call limit reached ({max_tool_calls}). "
+                            "No more tool calls allowed in this execution."
+                        )
+                    }
                 else:
-                    result = message_callback(request_data)
+                    # Strip forbidden terminal parameters
+                    if tool_name == "terminal" and isinstance(tool_args, dict):
+                        for param in _TERMINAL_BLOCKED_PARAMS:
+                            tool_args.pop(param, None)
+                    
+                    # Dispatch through standard tool handler
+                    try:
+                        _real_stdout, _real_stderr = sys.stdout, sys.stderr
+                        sys.stdout = open(os.devnull, "w")
+                        sys.stderr = open(os.devnull, "w")
+                        try:
+                            result = handle_function_call(
+                                tool_name, tool_args, task_id=task_id
+                            )
+                            if not isinstance(result, str):
+                                result = json.dumps(result)
+                        finally:
+                            sys.stdout.close()
+                            sys.stderr.close()
+                            sys.stdout, sys.stderr = _real_stdout, _real_stderr
+                    except Exception as exc:
+                        logger.error("Tool call failed in sandbox: %s", exc, exc_info=True)
+                        result = json.dumps({"error": str(exc)})
+                    
+                    tool_call_counter[0] += 1
+                    call_duration = time.monotonic() - call_start
+                    
+                    # Log for observability
+                    args_preview = str(tool_args)[:80]
+                    tool_call_log.append({
+                        "tool": tool_name,
+                        "args_preview": args_preview,
+                        "duration": round(call_duration, 2),
+                    })
                 
-                conn.sendall((result + "\n").encode())
+                results.append(result)
+                stop_event.set()
+            
+            # Start listening with callback
+            ipc_transport.listen(message_callback)
+            
+            # Wait for first message or timeout
+            stop_event.wait(timeout=30.0)
+            
+            # Return the first result (for compatibility)
+            if results:
+                return results[0]
+            else:
+                return json.dumps({"error": "No request received"})
                 
-            except socket.timeout:
-                break
-            except OSError:
-                break  # Connection lost
+        else:
+            # Unix socket - use accept() API
+            conn = ipc_transport.accept()
+            
+            def message_callback(request):
+                """Handle incoming RPC messages."""
+                call_start = time.monotonic()
                 
+                tool_name = request.get("tool", "")
+                tool_args = request.get("args", {})
+                
+                # Enforce allow-list
+                if tool_name not in allowed_tools:
+                    available = ", ".join(sorted(allowed_tools))
+                    return {
+                        "error": (
+                            f"Tool '{tool_name}' is not available in execute_code. "
+                            f"Available: {available}"
+                        )
+                    }
+                
+                # Enforce tool call limit
+                if tool_call_counter[0] >= max_tool_calls:
+                    return {
+                        "error": (
+                            f"Tool call limit reached ({max_tool_calls}). "
+                            "No more tool calls allowed in this execution."
+                        )
+                    }
+                
+                # Strip forbidden terminal parameters
+                if tool_name == "terminal" and isinstance(tool_args, dict):
+                    for param in _TERMINAL_BLOCKED_PARAMS:
+                        tool_args.pop(param, None)
+                
+                # Dispatch through standard tool handler
+                try:
+                    _real_stdout, _real_stderr = sys.stdout, sys.stderr
+                    sys.stdout = open(os.devnull, "w")
+                    sys.stderr = open(os.devnull, "w")
+                    try:
+                        result = handle_function_call(
+                            tool_name, tool_args, task_id=task_id
+                        )
+                    finally:
+                        sys.stdout.close()
+                        sys.stderr.close()
+                        sys.stdout, sys.stderr = _real_stdout, _real_stderr
+                except Exception as exc:
+                    logger.error("Tool call failed in sandbox: %s", exc, exc_info=True)
+                    result = json.dumps({"error": str(exc)})
+                
+                tool_call_counter[0] += 1
+                call_duration = time.monotonic() - call_start
+                
+                # Log for observability
+                args_preview = str(tool_args)[:80]
+                tool_call_log.append({
+                    "tool": tool_name,
+                    "args_preview": args_preview,
+                    "duration": round(call_duration, 2),
+                })
+                
+                # Return result (may be JSON string)
+                return result
+
+            # Process messages until client disconnects or limit reached
+            while tool_call_counter[0] < max_tool_calls:
+                try:
+                    request = conn.recv(4096).decode().strip()
+                    if not request:
+                        break  # Client disconnected
+                    
+                    # Parse request and get response
+                    try:
+                        request_data = json.loads(request)
+                    except json.JSONDecodeError:
+                        result = json.dumps({"error": "Invalid JSON request"})
+                    else:
+                        result = message_callback(request_data)
+                    
+                    conn.sendall((result + "\n").encode())
+                    
+                except socket.timeout:
+                    break
+                except OSError:
+                    break  # Connection lost
+                    
     except socket.timeout:
         logger.debug("RPC listener socket timeout")
     except OSError as e:
