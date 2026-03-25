@@ -23,6 +23,7 @@ try:
     import win32security
     import win32con
     import winerror
+    import win32api
     import pywintypes
     PYWIN32_AVAILABLE = True
 except ImportError:
