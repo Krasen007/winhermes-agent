@@ -27,6 +27,11 @@ def curses_checklist(
     if cancel_returns is None:
         cancel_returns = set(selected)
 
+    # Skip curses on Windows as _curses module is not available
+    import sys
+    if sys.platform == "win32":
+        return _numbered_fallback(title, items, selected, cancel_returns)
+
     try:
         import curses
         chosen = set(selected)

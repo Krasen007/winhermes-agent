@@ -363,6 +363,10 @@ def prompt(question: str, default: str = None, password: bool = False) -> str:
 
 def _curses_prompt_choice(question: str, choices: list, default: int = 0) -> int:
     """Single-select menu using curses to avoid simple_term_menu rendering bugs."""
+    # Skip curses on Windows as _curses module is not available
+    if sys.platform == "win32":
+        return -1
+        
     try:
         import curses
         result_holder = [default]
@@ -395,7 +399,7 @@ def _curses_prompt_choice(question: str, choices: list, default: int = 0) -> int
                     if y >= max_y - 1:
                         break
                     arrow = "→" if i == cursor else " "
-                    line = f" {arrow}  {choice}"
+                    line = f" {arrow}  {i+1}. {choice}"
                     attr = curses.A_NORMAL
                     if i == cursor:
                         attr = curses.A_BOLD
@@ -444,9 +448,9 @@ def prompt_choice(question: str, choices: list, default: int = 0) -> int:
     for i, choice in enumerate(choices):
         marker = "●" if i == default else "○"
         if i == default:
-            print(color(f"  {marker} {choice}", Colors.GREEN))
+            print(color(f"  {marker} {i+1}. {choice}", Colors.GREEN))
         else:
-            print(f"  {marker} {choice}")
+            print(f"  {marker} {i+1}. {choice}")
 
     print_info(f"  Enter for default ({default + 1})  Ctrl+C to exit")
 
